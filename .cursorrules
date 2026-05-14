@@ -1,6 +1,6 @@
 # Cursor Rules for OpenDDIL Projector
 
-- **Context**: Single generic Kafka → Postgres projector. Consumes pipeline topics, UPSERTs into Postgres read-model tables that ElectricSQL exposes to the UI. One service, many subscriptions (ADR-0016).
+- **Context**: Single generic Kafka → Postgres projector. Consumes pipeline topics, UPSERTs into Postgres read-model tables that ElectricSQL exposes to the UI. One service, many subscriptions (ADR-0019).
 - **Dumb pipe discipline**: decode → map fields → UPSERT. NO business logic. Severity computation, discrepancy analysis, fusion all live upstream (cm-service / logistics-fusion / faust-edge). The projector only moves bytes into rows.
 - **At-least-once delivery**: never commit a Kafka offset before the Postgres write succeeds. On Postgres-down, retry with exponential backoff — never drop a message.
 - **Schema-drift tolerance**: a decode error or unknown field must NEVER crash the consumer. Log once per (topic, field), bump `projector_decode_errors_total`, skip the message.

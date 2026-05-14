@@ -13,7 +13,7 @@ per-topic projector and no Faust HTTP endpoint.
 One service, many subscriptions. Adding a new topic to the UI is a YAML
 mapping entry + a handler, not a new service.
 
-## Architecture (ADR-0016)
+## Architecture (ADR-0019)
 
 ```
 Kafka topic ──► decoder ──► handler (field map) ──► Postgres UPSERT ──► ElectricSQL Shape ──► UI

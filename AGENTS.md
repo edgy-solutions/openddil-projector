@@ -10,7 +10,7 @@ Postgres read-model tables. ElectricSQL then exposes those tables as Shapes
 to the UI. One service, many subscriptions; new topics are added via a YAML
 mapping entry + a handler, not a new service.
 
-Introduced in Phase 4a (see ADR-0016 for the single-projector decision).
+Introduced in Phase 4a (see ADR-0019 for the single-projector decision).
 
 ## What You CAN Do
 
