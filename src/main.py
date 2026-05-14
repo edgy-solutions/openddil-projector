@@ -32,6 +32,7 @@ from decoders import (
     decode_cloudevent,
     decode_json,
 )
+from edge_buffer_monitor import edge_buffer_loop
 from handlers import get_handler
 from metrics import (
     DECODE_ERRORS,
@@ -309,6 +310,8 @@ async def main() -> None:
     tasks = [asyncio.create_task(w.run()) for w in workers]
     tasks.append(asyncio.create_task(prune_loop(pool, config.mappings)))
     tasks.append(asyncio.create_task(lag_loop(workers)))
+    # Phase 4c.5: edge->HQ DDIL link/buffer monitor.
+    tasks.append(asyncio.create_task(edge_buffer_loop(pool)))
 
     log.info("projector running: %d topic consumers", len(workers))
     await stop_event.wait()
