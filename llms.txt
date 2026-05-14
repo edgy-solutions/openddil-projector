@@ -1,0 +1,64 @@
+# OpenDDIL Projector — LLM Context
+
+This repository (`openddil-projector`) houses the Kafka → Postgres projector
+for OpenDDIL, introduced in Phase 4a.
+
+## Purpose
+
+A single generic service that consumes pipeline Kafka topics and UPSERTs
+them into Postgres read-model tables. ElectricSQL exposes those tables as
+Shapes to the UI. This is the ONLY Kafka→Postgres path; there is no
+per-topic projector and no Faust HTTP endpoint.
+
+One service, many subscriptions. Adding a new topic to the UI is a YAML
+mapping entry + a handler, not a new service.
+
+## Architecture (ADR-0016)
+
+```
+Kafka topic ──► decoder ──► handler (field map) ──► Postgres UPSERT ──► ElectricSQL Shape ──► UI
+```
+
+The projector is a DUMB PIPE. It has no business logic. Severity
+computation, discrepancy analysis, and fusion all happen upstream.
+
+## Key Files
+
+- `src/main.py` — entrypoint. One consumer task per configured topic;
+  Prometheus metrics on :8084; SIGHUP reloads config.
+- `src/config/projector_config.yaml` — topic→table mapping, hot-reloadable.
+- `src/handlers/base.py` — Handler interface: `handle(key, decoded) -> Upsert`.
+- `src/handlers/{cm_state,logistics_status,telemetry_latest,tactical_events,telemetry_windows}.py`
+  — one per topic; pure field-mapping functions.
+- `src/decoders/proto.py` — protobuf decoders + schema-drift tolerance.
+- `src/decoders/cloudevents.py` — CloudEvents JSON decoder for tactical-events.
+- `src/persistence/postgres.py` — asyncpg pool + UPSERT/INSERT/prune helpers.
+
+## Topic → Table Mapping
+
+| Topic | Table | Mode | Decode as |
+|-------|-------|------|-----------|
+| asset-cm-state | asset_cm_state | upsert | AsMaintainedConfiguration |
+| asset-logistics-status | asset_logistics_status | upsert | AssetLogisticsStatusUpdate |
+| telemetry-latest-state | telemetry_latest_state | upsert | EntityTelemetryEvent |
+| tactical-events | tactical_events | append | CloudEvents JSON |
+| asset-telemetry-windows | asset_telemetry_windows | upsert | WindowedTelemetry |
+
+## Rules
+
+- At-least-once: commit Kafka offset only after the Postgres write succeeds.
+- Schema-drift tolerant: a bad message is logged and skipped, never fatal.
+- Backpressure: on Postgres-down, retry with backoff; do not crash, do not drop.
+- Rate limiting: >N updates/sec for one asset_id are coalesced in a small
+  per-asset buffer before UPSERT.
+- Append-only retention: `tactical_events` rows older than `retention_hours`
+  are pruned hourly by a background task.
+- Never write `audit_log` — HQ-only, not in the Electric publication.
+
+## Docker Compose
+
+When consumed by openddil-demo:
+- Base `docker-compose.yml` references `image: ghcr.io/edgy-solutions/openddil/projector:latest`.
+- `docker-compose.override.yml` has the `build:` block + the
+  `openddil-contracts/gen/python` mount for development.
+- NEVER add a `build:` to the base compose. Publish a new image first.

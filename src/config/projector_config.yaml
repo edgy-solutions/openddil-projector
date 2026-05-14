@@ -1,0 +1,68 @@
+# =============================================================================
+# OpenDDIL Projector — topic -> table mapping
+# =============================================================================
+# Hot-reloadable via SIGHUP. Each entry binds one Kafka topic to one handler
+# and one Postgres table. Adding a topic to the UI = a new entry here + a
+# handler in src/handlers/ + a table in the Atlas schema.
+#
+#   topic          — Kafka topic to subscribe to
+#   handler        — handler module name in src/handlers/ (without .py)
+#   table          — Postgres table the handler writes
+#   consumer_group — Kafka consumer group (one per topic, so lag is per-topic)
+#   decode_as      — one of:
+#                      * a fully-qualified proto message name
+#                      * "cloudevents.json" for JSON CloudEvents
+#                      * "json" for a plain json.dumps(...) payload
+#   mode           — "upsert" (compacted topic -> UPSERT by PK) or
+#                    "append" (event stream -> INSERT, with TTL pruning)
+#   retention_hours — append mode only: rows older than this are pruned hourly
+# =============================================================================
+
+mappings:
+  # cm-service emits asset-cm-state as JSON (json.dumps), NOT protobuf —
+  # confirmed against the running stack in Phase 4a. Integer enum values
+  # and *_ns integer timestamps; the cm_state handler owns the mapping.
+  - topic: asset-cm-state
+    handler: cm_state
+    table: asset_cm_state
+    consumer_group: projector-cm-state
+    decode_as: json
+    mode: upsert
+
+  - topic: asset-logistics-status
+    handler: logistics_status
+    table: asset_logistics_status
+    consumer_group: projector-logistics-status
+    decode_as: openddil.logistics.v1.AssetLogisticsStatusUpdate
+    mode: upsert
+
+  - topic: telemetry-latest-state
+    handler: telemetry_latest
+    table: telemetry_latest_state
+    consumer_group: projector-telemetry-latest
+    decode_as: openddil.telemetry.v1.EntityTelemetryEvent
+    mode: upsert
+
+  - topic: tactical-events
+    handler: tactical_events
+    table: tactical_events
+    consumer_group: projector-tactical-events
+    decode_as: cloudevents.json
+    mode: append
+    retention_hours: 24
+
+  - topic: asset-telemetry-windows
+    handler: telemetry_windows
+    table: asset_telemetry_windows
+    consumer_group: projector-telemetry-windows
+    decode_as: openddil.logistics.v1.WindowedTelemetry
+    mode: upsert
+
+# Global tuning. Overridable via env (RATE_LIMIT_PER_SEC).
+settings:
+  # If one asset_id exceeds this many updates/sec, coalesce in a per-asset
+  # buffer and UPSERT the latest only.
+  rate_limit_per_sec: 10
+  # Postgres write retry on failure (exponential backoff base, in seconds).
+  postgres_retry_base_seconds: 0.5
+  postgres_retry_max_seconds: 30

@@ -1,0 +1,12 @@
+# Cursor Rules for OpenDDIL Projector
+
+- **Context**: Single generic Kafka → Postgres projector. Consumes pipeline topics, UPSERTs into Postgres read-model tables that ElectricSQL exposes to the UI. One service, many subscriptions (ADR-0016).
+- **Dumb pipe discipline**: decode → map fields → UPSERT. NO business logic. Severity computation, discrepancy analysis, fusion all live upstream (cm-service / logistics-fusion / faust-edge). The projector only moves bytes into rows.
+- **At-least-once delivery**: never commit a Kafka offset before the Postgres write succeeds. On Postgres-down, retry with exponential backoff — never drop a message.
+- **Schema-drift tolerance**: a decode error or unknown field must NEVER crash the consumer. Log once per (topic, field), bump `projector_decode_errors_total`, skip the message.
+- **Config-driven**: topic→table mapping lives in `src/config/projector_config.yaml`, hot-reloadable via SIGHUP. Adding a topic = a mapping entry + a handler, not a code-path branch.
+- **Compacted vs append**: compacted topics use `mode: upsert` (UPSERT by PK). `tactical-events` uses `mode: append` with a TTL pruner (`retention_hours`).
+- **Proto stubs**: mounted from `openddil-contracts/gen/python` at runtime via `PYTHONPATH=/proto`. NEVER baked into the image.
+- **Never touch `audit_log`**: HQ-only table, not in the Electric publication.
+- **Docker Compose**: base `openddil-demo/docker-compose.yml` references `image: ghcr.io/edgy-solutions/openddil/projector:latest`. NEVER add `build:` to the base compose — builds live in `docker-compose.override.yml`. Publish a new image when the Dockerfile changes.
+- **Handlers/decoders are pure functions** — unit-testable with no live Kafka or Postgres.
