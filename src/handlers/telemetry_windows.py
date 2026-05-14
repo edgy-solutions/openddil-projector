@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, parse_timestamp
+from .base import duration_to_seconds, now_utc, origin_provenance, parse_timestamp
 
 TABLE = "asset_telemetry_windows"
 
@@ -37,6 +37,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # are stored verbatim.
     row = {
         "asset_id": asset_id,
+        **origin_provenance(),
         "platform_variant": decoded.get("platform_variant"),
         "fluid_trends": decoded.get("fluid_trends", []),
         "consumable_trends": decoded.get("consumable_trends", []),

@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, parse_timestamp
+from .base import duration_to_seconds, now_utc, origin_provenance, parse_timestamp
 
 TABLE = "asset_logistics_status"
 
@@ -27,6 +27,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
 
     row = {
         "asset_id": asset_id,
+        **origin_provenance(),
         "platform_variant": status.get("platform_variant"),
         "overall_severity": status.get(
             "overall_severity", "LOGISTICS_SEVERITY_UNSPECIFIED"

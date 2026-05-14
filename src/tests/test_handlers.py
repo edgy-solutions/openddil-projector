@@ -234,3 +234,27 @@ def test_telemetry_windows_renames_wear_trends_column():
     assert write.row["fluid_trends"] == {"fuel_remaining": {"slope": -1.2}}
     assert write.row["window_duration_seconds"] == 900
     assert write.row["sample_count"] == 30
+
+
+# -- origin-node provenance (ADR-0022) ----------------------------------------
+# Every per-asset projection row carries edge_id / region_id. Single-tier
+# today (constant defaults), but the handler output is shaped for the
+# edge->regional->HQ hierarchy from the start. If a handler stops emitting
+# these, a flat-topology assumption has hardened — that is what this guards.
+
+def test_every_per_asset_handler_emits_origin_provenance():
+    cases = [
+        ("cm_state", "A1", {"asset_id": "A1", "lifecycle": 2}),
+        ("logistics_status", "A1", {"status": {"asset_id": "A1"}}),
+        ("telemetry_latest", "A1", {"asset": {"asset_id": "A1"}}),
+        ("telemetry_windows", "A1", {"asset_id": "A1"}),
+        ("tactical_events", "A1", {
+            "id": "ce-1", "source": "x", "type": "y",
+            "subject": "A1", "time": "2026-05-14T03:00:00Z",
+        }),
+    ]
+    for handler_name, key, decoded in cases:
+        write = get_handler(handler_name)(key, decoded)
+        assert write is not None, handler_name
+        assert write.row["edge_id"] == "edge-01", handler_name
+        assert write.row["region_id"] == "region-01", handler_name

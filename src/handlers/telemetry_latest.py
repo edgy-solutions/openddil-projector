@@ -15,7 +15,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_timestamp
+from .base import now_utc, origin_provenance, parse_timestamp
 
 TABLE = "telemetry_latest_state"
 
@@ -30,6 +30,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
 
     row = {
         "asset_id": asset_id,
+        **origin_provenance(),
         "platform_variant": asset.get("platform_variant"),
         "callsign": asset.get("callsign"),
         # ForceAffiliation enum -> its string name (e.g. "FORCE_FRIENDLY").

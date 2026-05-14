@@ -13,6 +13,7 @@ The helpers here cover the recurring proto-JSON quirks:
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -20,6 +21,31 @@ from persistence import Write
 
 # A handler maps (key, decoded) -> Write or None.
 Handler = Callable[[str, dict[str, Any]], "Write | None"]
+
+
+# -- origin-node provenance (ADR-0022) ----------------------------------------
+# OpenDDIL is hierarchical streaming aggregation: edge -> regional -> HQ. The
+# topology is currently collapsed to a single flat tier, so these are constant
+# defaults — but every per-asset Write the projector emits carries them
+# explicitly. The projector stays provenance-aware *in shape* even while
+# running flat: when the hierarchy phase lands, only the value source changes
+# (a per-tier deployment env, or a field on the message), not the handler
+# signature or the row schema. Retrofitting an echelon dimension after the
+# shapes, rollups, and ALCS/EAGLE egress bridges already exist is the
+# expensive path this avoids.
+ORIGIN_EDGE_ID = os.getenv("OPENDDIL_EDGE_ID", "edge-01")
+ORIGIN_REGION_ID = os.getenv("OPENDDIL_REGION_ID", "region-01")
+
+
+def origin_provenance() -> dict[str, str]:
+    """The origin-node columns every per-asset projection row carries.
+
+    Constant today (single-tier); env-overridable for a future per-tier
+    deployment. See ADR-0022 for why this stays explicit rather than leaning
+    on the DB column default. Named `origin_*` to stay distinct from the
+    telemetry-message `provenance` blob (producer_id / source_protocol /
+    sample_time) that telemetry_latest_state also carries."""
+    return {"edge_id": ORIGIN_EDGE_ID, "region_id": ORIGIN_REGION_ID}
 
 
 def now_utc() -> datetime:

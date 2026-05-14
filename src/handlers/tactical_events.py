@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import parse_timestamp
+from .base import origin_provenance, parse_timestamp
 
 TABLE = "tactical_events"
 
@@ -52,6 +52,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
 
     row = {
         "id": event_id,
+        **origin_provenance(),
         "source": decoded.get("source", ""),
         "type": decoded.get("type", ""),
         # `subject` is optional in CloudEvents; the OpenDDIL convention is

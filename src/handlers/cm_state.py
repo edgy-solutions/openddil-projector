@@ -22,7 +22,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_ns_timestamp
+from .base import now_utc, origin_provenance, parse_ns_timestamp
 
 log = logging.getLogger("projector.handler.cm_state")
 TABLE = "asset_cm_state"
@@ -62,6 +62,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
 
     row = {
         "asset_id": asset_id,
+        **origin_provenance(),
         "baseline_id": decoded.get("baseline_id"),
         "lifecycle": _enum_name(
             _LIFECYCLE, decoded.get("lifecycle"), "LIFECYCLE_UNSPECIFIED"
