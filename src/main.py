@@ -311,7 +311,14 @@ async def main() -> None:
     tasks.append(asyncio.create_task(prune_loop(pool, config.mappings)))
     tasks.append(asyncio.create_task(lag_loop(workers)))
     # Phase 4c.5: edge->HQ DDIL link/buffer monitor.
-    tasks.append(asyncio.create_task(edge_buffer_loop(pool)))
+    # ADR-0023 Phase 6a: with 3 projector instances (one per edge cluster),
+    # only one should run the buffer monitor — they all write to the same
+    # edge_buffer_status row otherwise. Gate via BUFFER_MONITOR_ENABLED env
+    # ("true" by default to preserve single-instance behavior; set "false"
+    # on the additional per-edge projector instances). Multi-edge buffer
+    # monitoring (per-edge bridge-group lag) is 6c rewire territory.
+    if os.getenv("BUFFER_MONITOR_ENABLED", "true").lower() == "true":
+        tasks.append(asyncio.create_task(edge_buffer_loop(pool)))
 
     log.info("projector running: %d topic consumers", len(workers))
     await stop_event.wait()
