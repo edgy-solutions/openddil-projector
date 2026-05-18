@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import origin_provenance, parse_timestamp
+from .base import parse_timestamp, resolve_provenance_from_top_level
 
 TABLE = "tactical_events"
 
@@ -50,9 +50,14 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         # decode_cloudevent already enforces id/source/type, but guard anyway.
         return None
 
+    # ADR-0023 Phase 6b §A: CloudEvent producers (faust-edge anomalies,
+    # cm-service config alerts) stamp edge_id/region_id into the `data`
+    # block. Read from data dict with rate-limited env-default fallback.
+    asset_subject = decoded.get("subject") or key or ""
+    data = decoded.get("data") if isinstance(decoded.get("data"), dict) else {}
     row = {
         "id": event_id,
-        **origin_provenance(),
+        **resolve_provenance_from_top_level(data, asset_subject, "tactical_events"),
         "source": decoded.get("source", ""),
         "type": decoded.get("type", ""),
         # `subject` is optional in CloudEvents; the OpenDDIL convention is

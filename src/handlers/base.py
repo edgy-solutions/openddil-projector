@@ -119,3 +119,85 @@ def first_present(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
         if k in d and d[k] is not None:
             return d[k]
     return default
+
+
+# -- Rate-limited fallback WARN helper (ADR-0023 Phase 6a/6b) -----------------
+# Per-process throttle keyed by (handler_label, edge_id_we_fell_back_to,
+# asset_id). One WARN per 60s per key, with a count of suppressed-in-window.
+# Used by every per-asset handler that switched from env-default attribution
+# to message-field provenance (Phase 6b §A).
+import logging as _logging
+import time as _time
+
+_FALLBACK_WARN_WINDOW_S = 60.0
+_fallback_last_warn: dict[tuple[str, str, str], tuple[float, int]] = {}
+
+
+def warn_provenance_fallback(handler_label: str, edge_id: str,
+                              asset_id: str) -> None:
+    """Emit a WARN at most once per _FALLBACK_WARN_WINDOW_S per key, with
+    suppressed-count in the next emission."""
+    log = _logging.getLogger(handler_label)
+    key = (handler_label, edge_id, asset_id)
+    now = _time.monotonic()
+    last = _fallback_last_warn.get(key)
+    if last is None or (now - last[0]) >= _FALLBACK_WARN_WINDOW_S:
+        if last is not None and last[1] > 0:
+            log.warning(
+                "provenance missing edge_id/region_id, falling back to env "
+                "(asset=%s) [%d more suppressed in last %ds]",
+                asset_id, last[1], int(_FALLBACK_WARN_WINDOW_S),
+            )
+        else:
+            log.warning(
+                "provenance missing edge_id/region_id, falling back to env "
+                "(asset=%s)", asset_id,
+            )
+        _fallback_last_warn[key] = (now, 0)
+    else:
+        _fallback_last_warn[key] = (last[0], last[1] + 1)
+
+
+def resolve_provenance_from_proto(provenance_msg: Any, asset_id: str,
+                                    handler_label: str) -> dict[str, str]:
+    """Read edge_id/region_id from a proto Provenance message; fall back to
+    env defaults with rate-limited WARN when absent. Returns the dict
+    callers spread into their Write.row."""
+    msg_edge = getattr(provenance_msg, "edge_id", "") or ""
+    msg_region = getattr(provenance_msg, "region_id", "") or ""
+    if not msg_edge or not msg_region:
+        warn_provenance_fallback(handler_label, ORIGIN_EDGE_ID, asset_id)
+    return {
+        "edge_id":   msg_edge or ORIGIN_EDGE_ID,
+        "region_id": msg_region or ORIGIN_REGION_ID,
+    }
+
+
+def resolve_provenance_from_dict(provenance_dict: dict, asset_id: str,
+                                   handler_label: str) -> dict[str, str]:
+    """Read edge_id/region_id from a decoded message's `provenance` dict
+    (proto-JSON shape). Same fallback semantics as the proto variant."""
+    msg_edge = (provenance_dict or {}).get("edge_id") or ""
+    msg_region = (provenance_dict or {}).get("region_id") or ""
+    if not msg_edge or not msg_region:
+        warn_provenance_fallback(handler_label, ORIGIN_EDGE_ID, asset_id)
+    return {
+        "edge_id":   msg_edge or ORIGIN_EDGE_ID,
+        "region_id": msg_region or ORIGIN_REGION_ID,
+    }
+
+
+def resolve_provenance_from_top_level(envelope: dict, asset_id: str,
+                                        handler_label: str) -> dict[str, str]:
+    """Read edge_id/region_id from a JSON envelope's top-level keys (the
+    cm-state shape — cm-service stamps these at the top, not nested in a
+    provenance block, because asset-cm-state is JSON not proto per
+    ADR-0018). Same fallback semantics."""
+    msg_edge = (envelope or {}).get("edge_id") or ""
+    msg_region = (envelope or {}).get("region_id") or ""
+    if not msg_edge or not msg_region:
+        warn_provenance_fallback(handler_label, ORIGIN_EDGE_ID, asset_id)
+    return {
+        "edge_id":   msg_edge or ORIGIN_EDGE_ID,
+        "region_id": msg_region or ORIGIN_REGION_ID,
+    }

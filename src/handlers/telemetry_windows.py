@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, origin_provenance, parse_timestamp
+from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_provenance_from_dict
 
 TABLE = "asset_telemetry_windows"
 
@@ -35,9 +35,13 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # fluid_trends is a proto map<string, ScalarTrend> -> JSON object.
     # consumable_trends / wear_trends are repeated -> JSON arrays. All three
     # are stored verbatim.
+    # ADR-0023 Phase 6b §A.2: faust-edge stamps WindowedTelemetry.provenance
+    # from its OPENDDIL_EDGE_ID env. Read from message-field with env-default
+    # fallback.
     row = {
         "asset_id": asset_id,
-        **origin_provenance(),
+        **resolve_provenance_from_dict(decoded.get("provenance") or {},
+                                          asset_id, "telemetry_windows"),
         "platform_variant": decoded.get("platform_variant"),
         "fluid_trends": decoded.get("fluid_trends", []),
         "consumable_trends": decoded.get("consumable_trends", []),

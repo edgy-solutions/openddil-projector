@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, origin_provenance, parse_timestamp
+from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_provenance_from_dict
 
 TABLE = "asset_logistics_status"
 
@@ -25,9 +25,12 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     if not asset_id:
         return None
 
+    # ADR-0023 Phase 6b §A: fusion stamps Provenance.edge_id/region_id on
+    # the envelope. Read from message-field with env-default fallback.
     row = {
         "asset_id": asset_id,
-        **origin_provenance(),
+        **resolve_provenance_from_dict(decoded.get("provenance") or {},
+                                          asset_id, "logistics_status"),
         "platform_variant": status.get("platform_variant"),
         "overall_severity": status.get(
             "overall_severity", "LOGISTICS_SEVERITY_UNSPECIFIED"

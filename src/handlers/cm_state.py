@@ -22,7 +22,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, origin_provenance, parse_ns_timestamp
+from .base import now_utc, parse_ns_timestamp, resolve_provenance_from_top_level
 
 log = logging.getLogger("projector.handler.cm_state")
 TABLE = "asset_cm_state"
@@ -60,9 +60,13 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     if not asset_id:
         return None
 
+    # ADR-0023 Phase 6b §A: cm-state is JSON (per ADR-0018) — cm-service
+    # stamps edge_id/region_id at the top level of the envelope (not in a
+    # nested provenance block). resolve_provenance_from_top_level reads
+    # those with rate-limited env-default fallback.
     row = {
         "asset_id": asset_id,
-        **origin_provenance(),
+        **resolve_provenance_from_top_level(decoded, asset_id, "cm_state"),
         "baseline_id": decoded.get("baseline_id"),
         "lifecycle": _enum_name(
             _LIFECYCLE, decoded.get("lifecycle"), "LIFECYCLE_UNSPECIFIED"

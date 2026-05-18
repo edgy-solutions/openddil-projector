@@ -24,47 +24,13 @@ events came from. That is expected partial-state during 6a, not a bug.
 """
 from __future__ import annotations
 
-import logging
-import time
 from typing import Any
 
 from persistence import Write
 
-from .base import ORIGIN_EDGE_ID, ORIGIN_REGION_ID, now_utc, parse_timestamp
+from .base import now_utc, parse_timestamp, resolve_provenance_from_dict
 
-log = logging.getLogger(__name__)
 TABLE = "telemetry_latest_state"
-
-
-# Rate-limited fallback WARN. Per-process throttle keyed by
-# (edge_id_we_fell_back_to, asset_id) so a single misbehaving asset
-# doesn't flood the log; one WARN per minute per (key) with a count of
-# suppressed messages. INFO log on flush so the count surfaces.
-_FALLBACK_WARN_WINDOW_S = 60.0
-_fallback_last_warn: dict[tuple[str, str], tuple[float, int]] = {}
-
-
-def _warn_fallback(edge_id: str, asset_id: str) -> None:
-    """Emit a WARN at most once per _FALLBACK_WARN_WINDOW_S per
-    (edge_id, asset_id), with a count of suppressed-in-window."""
-    key = (edge_id, asset_id)
-    now = time.monotonic()
-    last = _fallback_last_warn.get(key)
-    if last is None or (now - last[0]) >= _FALLBACK_WARN_WINDOW_S:
-        if last is not None and last[1] > 0:
-            log.warning(
-                "telemetry_latest: provenance missing edge_id/region_id, "
-                "falling back to env (asset=%s) [%d more suppressed in last %ds]",
-                asset_id, last[1], int(_FALLBACK_WARN_WINDOW_S),
-            )
-        else:
-            log.warning(
-                "telemetry_latest: provenance missing edge_id/region_id, "
-                "falling back to env (asset=%s)", asset_id,
-            )
-        _fallback_last_warn[key] = (now, 0)
-    else:
-        _fallback_last_warn[key] = (last[0], last[1] + 1)
 
 
 def handle(key: str, decoded: dict[str, Any]) -> Write | None:
@@ -76,18 +42,12 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     provenance = decoded.get("provenance") or {}
 
     # ADR-0023 §Projector: source edge_id/region_id from message-field with
-    # env-default fallback. The WARN is rate-limited (see _warn_fallback).
-    msg_edge_id = provenance.get("edge_id")
-    msg_region_id = provenance.get("region_id")
-    if not msg_edge_id or not msg_region_id:
-        _warn_fallback(ORIGIN_EDGE_ID, asset_id)
-    edge_id = msg_edge_id or ORIGIN_EDGE_ID
-    region_id = msg_region_id or ORIGIN_REGION_ID
+    # env-default fallback. WARN is rate-limited inside the helper.
+    origin = resolve_provenance_from_dict(provenance, asset_id, "telemetry_latest")
 
     row = {
         "asset_id": asset_id,
-        "edge_id": edge_id,
-        "region_id": region_id,
+        **origin,
         "platform_variant": asset.get("platform_variant"),
         "callsign": asset.get("callsign"),
         # ForceAffiliation enum -> its string name (e.g. "FORCE_FRIENDLY").
