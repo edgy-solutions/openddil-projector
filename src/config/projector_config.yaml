@@ -58,6 +58,31 @@ mappings:
     decode_as: openddil.logistics.v1.WindowedTelemetry
     mode: upsert
 
+  # ADR-0023 Phase 6b §B — regional rollups. Produced by faust-regional's
+  # aggregator App to redpanda-hq. Only the hq projector instance should
+  # subscribe (each instance has its own projector_config; per-edge
+  # projectors do NOT need these entries).
+  - topic: region-fleet-summary
+    handler: region_fleet_summary
+    table: region_fleet_summary
+    consumer_group: projector-region-fleet-summary
+    decode_as: openddil.regional.v1.RegionFleetSummary
+    mode: upsert
+
+  - topic: region-top-factors
+    handler: region_top_factors
+    table: region_top_factors
+    consumer_group: projector-region-top-factors
+    decode_as: openddil.regional.v1.RegionTopFactors
+    mode: upsert
+
+  - topic: region-wear-trends
+    handler: region_wear_trends
+    table: region_wear_trends
+    consumer_group: projector-region-wear-trends
+    decode_as: openddil.regional.v1.RegionWearTrends
+    mode: upsert
+
 # Global tuning. Overridable via env (RATE_LIMIT_PER_SEC).
 settings:
   # If one asset_id exceeds this many updates/sec, coalesce in a per-asset

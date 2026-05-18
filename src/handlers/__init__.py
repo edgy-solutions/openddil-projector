@@ -9,6 +9,9 @@ from __future__ import annotations
 from . import (
     cm_state,
     logistics_status,
+    region_fleet_summary,
+    region_top_factors,
+    region_wear_trends,
     tactical_events,
     telemetry_latest,
     telemetry_windows,
@@ -21,6 +24,10 @@ _REGISTRY: dict[str, Handler] = {
     "telemetry_latest": telemetry_latest.handle,
     "tactical_events": tactical_events.handle,
     "telemetry_windows": telemetry_windows.handle,
+    # ADR-0023 Phase 6b §B — regional rollups.
+    "region_fleet_summary": region_fleet_summary.handle,
+    "region_top_factors":   region_top_factors.handle,
+    "region_wear_trends":   region_wear_trends.handle,
 }
 
 
