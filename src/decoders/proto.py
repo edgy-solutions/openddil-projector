@@ -47,6 +47,19 @@ _MESSAGE_MODULES: dict[str, tuple[str, str]] = {
         "openddil.logistics.v1.windowed_telemetry_pb2",
         "WindowedTelemetry",
     ),
+    # ADR-0023 Phase 6b §B — regional rollups produced by faust-regional.
+    "openddil.regional.v1.RegionFleetSummary": (
+        "openddil.regional.v1.region_fleet_summary_pb2",
+        "RegionFleetSummary",
+    ),
+    "openddil.regional.v1.RegionTopFactors": (
+        "openddil.regional.v1.region_top_factors_pb2",
+        "RegionTopFactors",
+    ),
+    "openddil.regional.v1.RegionWearTrends": (
+        "openddil.regional.v1.region_wear_trends_pb2",
+        "RegionWearTrends",
+    ),
 }
 
 
