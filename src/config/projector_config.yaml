@@ -83,6 +83,21 @@ mappings:
     decode_as: openddil.regional.v1.RegionWearTrends
     mode: upsert
 
+  # Recipe v3 Sub-phase E — customer-overlay capability snapshots. The
+  # customer1 strike-capability Bloblang produces asset-capability-snapshot
+  # as JSON (a customer-overlay-specific Silver shape, not a proto type),
+  # so decode_as is `json`. Compacted, keyed by asset_id -> upsert. The
+  # topic is created on every cluster (topic-init parity), but only the
+  # projector instance on the edge cluster the customer feed lands on
+  # (edge-01 by convention) actually sees data — same single-writer
+  # pattern as the regional rollups, inverted.
+  - topic: asset-capability-snapshot
+    handler: capability_state
+    table: asset_capability_state
+    consumer_group: projector-capability-state
+    decode_as: json
+    mode: upsert
+
 # Global tuning. Overridable via env (RATE_LIMIT_PER_SEC).
 settings:
   # If one asset_id exceeds this many updates/sec, coalesce in a per-asset
