@@ -7,6 +7,7 @@ function. Adding a topic = a new module here + a config entry.
 from __future__ import annotations
 
 from . import (
+    capability_state,
     cm_state,
     logistics_status,
     region_fleet_summary,
@@ -28,6 +29,8 @@ _REGISTRY: dict[str, Handler] = {
     "region_fleet_summary": region_fleet_summary.handle,
     "region_top_factors":   region_top_factors.handle,
     "region_wear_trends":   region_wear_trends.handle,
+    # Recipe v3 Sub-phase E — customer-overlay capability snapshots.
+    "capability_state":     capability_state.handle,
 }
 
 
