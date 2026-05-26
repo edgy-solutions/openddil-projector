@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_provenance_from_dict
+from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_origin_or_derive
 
 TABLE = "asset_logistics_status"
 
@@ -25,12 +25,15 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     if not asset_id:
         return None
 
-    # ADR-0023 Phase 6b §A: fusion stamps Provenance.edge_id/region_id on
-    # the envelope. Read from message-field with env-default fallback.
+    # DIS path: fusion stamps Provenance.edge_id/region_id from the source
+    # event; pass through. Customer path: source event (asset-capability-
+    # snapshot) has no edge_id, fusion can't invent one — derive at the
+    # projector via the configured strategy (asset_id_prefix / static for
+    # positionless customer assets).
     row = {
         "asset_id": asset_id,
-        **resolve_provenance_from_dict(decoded.get("provenance") or {},
-                                          asset_id, "logistics_status"),
+        **resolve_origin_or_derive(decoded.get("provenance") or {},
+                                      asset_id, "logistics_status"),
         "platform_variant": status.get("platform_variant"),
         "overall_severity": status.get(
             "overall_severity", "LOGISTICS_SEVERITY_UNSPECIFIED"

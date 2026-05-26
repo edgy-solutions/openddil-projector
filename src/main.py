@@ -26,6 +26,7 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError, TopicPartition
 
 from config import Config, Mapping, load_config
+from edge_assignment import configure_from_config as configure_edge_assignment
 from decoders import (
     DecodeError,
     ProtoDecoder,
@@ -264,6 +265,15 @@ async def main() -> None:
     if not config.mappings:
         log.error("no mappings in projector config — nothing to do")
         sys.exit(1)
+
+    # Install the edge-assignment strategy for customer-feed handlers
+    # (telemetry_latest, capability_state, logistics_status) before the
+    # consumers start — those handlers import-time depend on it.
+    configure_edge_assignment(config.edge_assignment)
+    log.info(
+        "edge_assignment configured: strategy=%s",
+        (config.edge_assignment or {}).get("strategy") or "none",
+    )
 
     port = start_metrics_server()
     log.info("metrics server on :%d", port)

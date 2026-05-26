@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from edge_assignment import extract_wgs84
 from persistence import Write
 
-from .base import now_utc, parse_timestamp, resolve_provenance_from_dict
+from .base import now_utc, parse_timestamp, resolve_origin_or_derive
 
 TABLE = "telemetry_latest_state"
 
@@ -40,10 +41,18 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         return None
 
     provenance = decoded.get("provenance") or {}
+    kinematics = decoded.get("kinematics")
 
-    # ADR-0023 §Projector: source edge_id/region_id from message-field with
-    # env-default fallback. WARN is rate-limited inside the helper.
-    origin = resolve_provenance_from_dict(provenance, asset_id, "telemetry_latest")
+    # DIS path: provenance carries edge_id/region_id stamped at sensor-ingest;
+    # pass through.
+    # Customer path (Unit telemetry): provenance.edge_id is empty — derive via
+    # the configured edge_assignment strategy (typically nearest-FOB on the
+    # asset's WGS84 position). See src/edge_assignment.py.
+    lat, lon = extract_wgs84(kinematics)
+    origin = resolve_origin_or_derive(
+        provenance, asset_id, "telemetry_latest",
+        asset_lat=lat, asset_lon=lon,
+    )
 
     row = {
         "asset_id": asset_id,
@@ -52,7 +61,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "callsign": asset.get("callsign"),
         # ForceAffiliation enum -> its string name (e.g. "FORCE_FRIENDLY").
         "force_id": asset.get("force"),
-        "kinematics": decoded.get("kinematics"),
+        "kinematics": kinematics,
         "sustainment": decoded.get("sustainment"),
         "provenance": provenance,
         "last_sample_at": parse_timestamp(provenance.get("sample_time")),

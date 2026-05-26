@@ -19,7 +19,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_timestamp, resolve_provenance_from_dict
+from .base import now_utc, parse_timestamp, resolve_origin_or_derive
 
 TABLE = "asset_capability_state"
 HANDLER_LABEL = "capability_state"
@@ -30,11 +30,13 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     if not asset_id:
         return None
 
-    # The Silver shape carries a `provenance` block; edge_id/region_id are
-    # empty there (the Bloblang leaves them for a downstream stamper), so
-    # this resolves to the env defaults with the standard rate-limited WARN.
-    prov = resolve_provenance_from_dict(
-        decoded.get("provenance"), asset_id, HANDLER_LABEL
+    # The strike-capability Silver shape has empty provenance.edge_id (the
+    # customer Bloblang leaves it for the projector). And these messages
+    # carry no position — strike-only launchers have no telemetry. The
+    # configured edge_assignment strategy decides via asset_id_prefix /
+    # static / fallback. See src/edge_assignment.py.
+    prov = resolve_origin_or_derive(
+        decoded.get("provenance"), asset_id, HANDLER_LABEL,
     )
 
     row = {
