@@ -201,3 +201,36 @@ def resolve_provenance_from_top_level(envelope: dict, asset_id: str,
         "edge_id":   msg_edge or ORIGIN_EDGE_ID,
         "region_id": msg_region or ORIGIN_REGION_ID,
     }
+
+
+def resolve_origin_or_derive(
+    provenance_dict: dict | None,
+    asset_id: str,
+    handler_label: str,
+    *,
+    asset_lat: float | None = None,
+    asset_lon: float | None = None,
+) -> dict[str, str]:
+    """For customer-feed paths whose wire shape carries no edge_id.
+
+    If the message DOES carry edge_id/region_id (the DIS path stamps them
+    upstream), pass them through. Otherwise derive via the configured
+    edge_assignment strategy (nearest-FOB, asset_id_prefix, …); see
+    src/edge_assignment.py. Falls back to the configured last-resort
+    (typically edge-unspecified / region-unspecified) when the strategy
+    has nothing to go on.
+
+    Distinct from resolve_provenance_from_dict — that one assumes the
+    emitter SHOULD have stamped edge_id (cm-service, fusion) and WARNs
+    when it didn't. Here the absence is expected (customer assets) and
+    the strategy is the routine path, not a fallback warning."""
+    msg_edge = (provenance_dict or {}).get("edge_id") or ""
+    msg_region = (provenance_dict or {}).get("region_id") or ""
+    if msg_edge and msg_region:
+        return {"edge_id": msg_edge, "region_id": msg_region}
+    # Import inside the function to avoid an import-order coupling — the
+    # singleton is installed by main.py at startup, after handlers are
+    # already imported.
+    from edge_assignment import resolve_for
+    assignment = resolve_for(asset_id, asset_lat, asset_lon, handler_label)
+    return {"edge_id": assignment.edge_id, "region_id": assignment.region_id}

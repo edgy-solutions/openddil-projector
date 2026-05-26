@@ -37,6 +37,10 @@ class Settings:
 class Config:
     mappings: list[Mapping] = field(default_factory=list)
     settings: Settings = field(default_factory=Settings)
+    # Raw `edge_assignment` block from the YAML, consumed by
+    # src/edge_assignment.py's `configure_from_config`. Kept as a dict here so
+    # registering a new strategy doesn't require touching this typed Config.
+    edge_assignment: dict[str, Any] = field(default_factory=dict)
 
     def mapping_by_topic(self) -> dict[str, Mapping]:
         return {m.topic: m for m in self.mappings}
@@ -78,4 +82,21 @@ def load_config(path: Path | None = None) -> Config:
             s.get("postgres_retry_max_seconds", 30.0)
         ),
     )
-    return Config(mappings=mappings, settings=settings)
+    edge_assignment = raw.get("edge_assignment") or {}
+
+    # Overlay-supplied edge assignment. A deployment overlay can point this
+    # at a separate file (typically a ConfigMap mount) so customer-specific
+    # FOB lists and asset_id mappings live OUTSIDE the OSS config. When the
+    # env var is set and the file exists, its contents REPLACE the main
+    # config's edge_assignment block. Both shapes are accepted: a top-level
+    # `edge_assignment:` wrapper, or the block's contents at the top level.
+    override_path = os.getenv("EDGE_ASSIGNMENT_CONFIG")
+    if override_path:
+        override_file = Path(override_path)
+        if override_file.is_file():
+            override_raw = (
+                yaml.safe_load(override_file.read_text(encoding="utf-8")) or {}
+            )
+            edge_assignment = override_raw.get("edge_assignment", override_raw)
+
+    return Config(mappings=mappings, settings=settings, edge_assignment=edge_assignment)

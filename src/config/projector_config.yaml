@@ -98,6 +98,35 @@ mappings:
     decode_as: json
     mode: upsert
 
+# =============================================================================
+# Edge assignment — for customer assets that don't carry edge_id
+# =============================================================================
+# Customer wire shapes (Unit telemetry, strike capability) carry no edge_id —
+# edges are an OpenDDIL-side construct, not customer reality. The projector
+# decides the presentation edge_id per asset using one of the registered
+# strategies (see src/edge_assignment.py). New strategies plug in via
+# @register_strategy without editing this file.
+#
+# THIS OSS DEFAULT IS EMPTY. No FOB coordinates and no asset-id mappings —
+# customer-specific data does not belong in the OSS config. Customer assets
+# fall through to the fallback ("edge-unspecified") on an OSS-only install.
+#
+# A deployment overlay supplies its own edge-assignment YAML (FOB lat/lons,
+# prefix maps, etc.) as a ConfigMap mounted into the projector pod, and
+# points the projector at it via the EDGE_ASSIGNMENT_CONFIG env var:
+#
+#   EDGE_ASSIGNMENT_CONFIG=/etc/openddil/edge-assignment/edge-assignment.yaml
+#
+# When that env var is set and the file exists, its contents REPLACE the
+# block below at startup. The file may use this same top-level structure
+# directly, OR wrap it under `edge_assignment:` — both shapes are accepted.
+edge_assignment:
+  strategy: chain
+  chain: []
+  fallback:
+    edge_id: edge-unspecified
+    region_id: region-unspecified
+
 # Global tuning. Overridable via env (RATE_LIMIT_PER_SEC).
 settings:
   # If one asset_id exceeds this many updates/sec, coalesce in a per-asset
