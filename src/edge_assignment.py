@@ -294,6 +294,13 @@ def extract_wgs84(kinematics: Any) -> tuple[Optional[float], Optional[float]]:
         lat_raw = wgs84.get("lat")
     if lon_raw is None and isinstance(wgs84, dict):
         lon_raw = wgs84.get("lon")
+    # Unwrap {unit, value} objects emitted by sensor-ingest's unit-aware
+    # encoder (e.g. {"lat": {"unit":"deg","value":52.957}}). Legacy/inline
+    # shapes still send raw floats. Tolerate both.
+    if isinstance(lat_raw, dict):
+        lat_raw = lat_raw.get("value")
+    if isinstance(lon_raw, dict):
+        lon_raw = lon_raw.get("value")
     try:
         lat = float(lat_raw) if lat_raw is not None else None
         lon = float(lon_raw) if lon_raw is not None else None
