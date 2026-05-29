@@ -168,6 +168,53 @@ def test_telemetry_latest_flattens_identity_keeps_blobs():
     assert write.row["kinematics"]["position"]["ecef"]["x"]["unit"] == "m"
     assert isinstance(write.row["last_sample_at"], datetime)
     assert {"kinematics", "sustainment", "provenance"} <= write.jsonb_columns
+    # Phase 5: operational_state absent in this DIS-shape decoded message —
+    # all five op_state columns should be None so postgres stores NULLs.
+    assert write.row["power_state"] is None
+    assert write.row["functional_mode"] is None
+    assert write.row["health_state"] is None
+    assert write.row["actively_receiving"] is None
+    assert write.row["actively_transmitting"] is None
+
+
+def test_telemetry_latest_extracts_operational_state():
+    """Phase 5: when EntityTelemetryEvent carries operational_state (the
+    customer-overlay sensor branch is the first producer; future DIS / AFSim /
+    VRForces adapters too), the 3 enum axes + 2 activity booleans land
+    in their own columns for direct SQL filtering and SPA rendering."""
+    decoded = {
+        "asset": {
+            "asset_id": "demo:***_***_MRAD2_radar_MRAD_Sensor",
+            "platform_variant": "MRAD_Sensor",
+            "force": "FORCE_FRIENDLY",
+        },
+        "kinematics": {"position": {"wgs84": {
+            "lat": {"value": 51.17, "unit": "deg"},
+            "lon": {"value": 4.21, "unit": "deg"},
+        }}},
+        "operational_state": {
+            "power_state":           "POWER_STATE_OPERATE",
+            "functional_mode":       "FUNCTIONAL_MODE_ACTIVE",
+            "health_state":          "HEALTH_STATE_DEGRADED",
+            "actively_receiving":    True,
+            "actively_transmitting": False,
+        },
+        "provenance": {"producer_id": "proprietary-amqp",
+                       "source_protocol": "proprietary-v1",
+                       "sample_time": "2026-05-29T00:00:00Z"},
+        "schema_revision": 2,
+    }
+    write = get_handler("telemetry_latest")(
+        "demo:***_***_MRAD2_radar_MRAD_Sensor", decoded)
+    assert write is not None
+    assert write.row["power_state"] == "POWER_STATE_OPERATE"
+    assert write.row["functional_mode"] == "FUNCTIONAL_MODE_ACTIVE"
+    assert write.row["health_state"] == "HEALTH_STATE_DEGRADED"
+    assert write.row["actively_receiving"] is True
+    assert write.row["actively_transmitting"] is False
+    # op_state columns are NOT in jsonb_columns — they're scalar text/bool.
+    assert "power_state" not in write.jsonb_columns
+    assert "actively_receiving" not in write.jsonb_columns
 
 
 # -- tactical_events ----------------------------------------------------------

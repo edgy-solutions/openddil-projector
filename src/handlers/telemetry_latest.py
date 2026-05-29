@@ -54,6 +54,14 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         asset_lat=lat, asset_lon=lon,
     )
 
+    # Phase 5: operational_state 3-axis breakout. Producers that emit the
+    # field (customer-overlay sensor branch via subsystem_state decomposition;
+    # future DIS / AFSim / VRForces adapters) populate this block;
+    # producers that don't (legacy Unit telemetry, capability-only assets)
+    # leave it absent — read as `None` so postgres stores NULL and the
+    # SPA's GROUND DIAGNOSTICS panel renders "—" for each axis.
+    op_state = decoded.get("operational_state") or {}
+
     row = {
         "asset_id": asset_id,
         **origin,
@@ -66,6 +74,16 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "provenance": provenance,
         "last_sample_at": parse_timestamp(provenance.get("sample_time")),
         "schema_revision": int(decoded.get("schema_revision", 0) or 0),
+        # Phase 5: operational_state columns. Enum fields are stored as
+        # the proto's full enum-name strings ("POWER_STATE_OPERATE" etc.) —
+        # protobuf JSON decoders default to that representation, and the
+        # SPA's pill labels parse the same form. Boolean fields pass
+        # through as native bool / None.
+        "power_state":           op_state.get("power_state"),
+        "functional_mode":       op_state.get("functional_mode"),
+        "health_state":          op_state.get("health_state"),
+        "actively_receiving":    op_state.get("actively_receiving"),
+        "actively_transmitting": op_state.get("actively_transmitting"),
         "updated_at": now_utc(),
     }
 
