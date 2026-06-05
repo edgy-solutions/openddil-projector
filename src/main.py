@@ -230,23 +230,49 @@ class ConsumerWorker:
 
 
 async def prune_loop(pool: PostgresPool, mappings: list[Mapping]) -> None:
-    """Hourly retention pruning for append-mode tables."""
+    """Hourly retention pruning. Two flavors of cleanup share the loop:
+
+    * APPEND mode (e.g. tactical_events) -- rolling-window event log;
+      drops rows where `time` is older than retention_hours.
+    * UPSERT mode with asset_ttl_hours set (e.g. telemetry_latest_state,
+      asset_cm_state, ...) -- bounds postgres growth across long-
+      running demos where every asset_id ever seen would otherwise
+      accumulate. Drops rows where `updated_at` is older than
+      asset_ttl_hours. The 5-tier liveness model on the frontend
+      already hides assets at the operator level; this TTL is the
+      separate long-tail cap so postgres doesn't grow without bound.
+      Different window than the frontend's LOST threshold by design
+      -- postgres is the long memory, the SPA filters for what
+      operators want to see.
+
+    Rollup tables (region_*) are aggregates whose updated_at is bumped
+    whenever the underlying assets churn; they shouldn't be aged out by
+    a static TTL. Leave asset_ttl_hours unset in their mappings.
+    """
     append_tables = [
-        (m.table, m.retention_hours)
+        (m.table, "time", m.retention_hours)
         for m in mappings
         if m.mode == "append" and m.retention_hours
     ]
-    if not append_tables:
+    upsert_tables = [
+        (m.table, "updated_at", m.asset_ttl_hours)
+        for m in mappings
+        if m.mode == "upsert" and m.asset_ttl_hours
+    ]
+    all_targets = append_tables + upsert_tables
+    if not all_targets:
         return
+    log.info("prune_loop: %d append target(s), %d upsert target(s)",
+             len(append_tables), len(upsert_tables))
     while True:
         await asyncio.sleep(3600)
-        for table, hours in append_tables:
+        for table, key_col, hours in all_targets:
             try:
-                deleted = await pool.prune_older_than(table, "time", hours)
+                deleted = await pool.prune_older_than(table, key_col, hours)
                 if deleted:
                     ROWS_PRUNED.labels(table=table).inc(deleted)
-                    log.info("pruned %d rows from %s (> %dh old)",
-                             deleted, table, hours)
+                    log.info("pruned %d rows from %s (> %dh old by %s)",
+                             deleted, table, hours, key_col)
             except Exception as exc:  # noqa: BLE001
                 log.warning("prune failed for %s: %s", table, exc)
 

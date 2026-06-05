@@ -23,7 +23,17 @@ class Mapping:
     consumer_group: str
     decode_as: str
     mode: str  # "upsert" | "append"
+    # Append-mode only: drop rows older than this many hours (the
+    # tactical_events 24h rolling window). Hourly cleanup loop runs
+    # the DELETE; key column is "time".
     retention_hours: int | None = None
+    # Upsert-mode only: drop rows whose updated_at is older than this
+    # many hours. Bounds postgres growth across long-running demos
+    # where the upsert tables would otherwise accumulate every
+    # asset_id ever seen across sim sessions. None = no TTL (the
+    # rollup tables are aggregates and shouldn't be aged out by
+    # asset turnover). Same hourly cleanup loop handles both modes.
+    asset_ttl_hours: int | None = None
 
 
 @dataclass
@@ -57,7 +67,25 @@ def load_config(path: Path | None = None) -> Config:
     raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
     mappings: list[Mapping] = []
+    # Single-knob override: PROJECTOR_ASSET_TTL_HOURS forces every
+    # upsert mapping's asset_ttl_hours to this value (env > yaml).
+    # Lets an operator dial the TTL up/down for a particular cluster
+    # without editing yaml mounted from a ConfigMap. 0 disables the
+    # TTL for ALL upsert mappings (escape hatch). Empty string / unset
+    # = honor whatever the yaml specifies per mapping.
+    env_ttl_raw = os.getenv("PROJECTOR_ASSET_TTL_HOURS", "").strip()
+    env_ttl_override: int | None
+    if env_ttl_raw == "":
+        env_ttl_override = None
+    else:
+        env_ttl_override = int(env_ttl_raw)  # may be 0 (= disable)
+
     for entry in raw.get("mappings", []):
+        mode = entry.get("mode", "upsert")
+        asset_ttl = entry.get("asset_ttl_hours")
+        if mode == "upsert" and env_ttl_override is not None:
+            # 0 disables; positive value overrides whatever yaml said.
+            asset_ttl = env_ttl_override if env_ttl_override > 0 else None
         mappings.append(
             Mapping(
                 topic=entry["topic"],
@@ -65,8 +93,9 @@ def load_config(path: Path | None = None) -> Config:
                 table=entry["table"],
                 consumer_group=entry["consumer_group"],
                 decode_as=entry["decode_as"],
-                mode=entry.get("mode", "upsert"),
+                mode=mode,
                 retention_hours=entry.get("retention_hours"),
+                asset_ttl_hours=asset_ttl,
             )
         )
 

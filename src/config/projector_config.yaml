@@ -22,12 +22,22 @@ mappings:
   # cm-service emits asset-cm-state as JSON (json.dumps), NOT protobuf —
   # confirmed against the running stack in Phase 4a. Integer enum values
   # and *_ns integer timestamps; the cm_state handler owns the mapping.
+  # Per-asset upsert tables ship with `asset_ttl_hours: 24` so the
+  # projector's hourly prune loop bounds postgres growth across long-
+  # running demos. The frontend's 5-tier liveness model hides assets
+  # at the operator level on a much shorter horizon (~5 min default);
+  # this TTL is the separate long-tail cap so postgres doesn't grow
+  # without bound. Override globally via PROJECTOR_ASSET_TTL_HOURS env
+  # (set to 0 to disable for ALL upsert mappings). Rollup tables
+  # (region_*) intentionally omit this -- they're aggregates and
+  # shouldn't be aged out by asset turnover.
   - topic: asset-cm-state
     handler: cm_state
     table: asset_cm_state
     consumer_group: projector-cm-state
     decode_as: json
     mode: upsert
+    asset_ttl_hours: 24
 
   - topic: asset-logistics-status
     handler: logistics_status
@@ -35,6 +45,7 @@ mappings:
     consumer_group: projector-logistics-status
     decode_as: openddil.logistics.v1.AssetLogisticsStatusUpdate
     mode: upsert
+    asset_ttl_hours: 24
 
   - topic: telemetry-latest-state
     handler: telemetry_latest
@@ -42,6 +53,7 @@ mappings:
     consumer_group: projector-telemetry-latest
     decode_as: openddil.telemetry.v1.EntityTelemetryEvent
     mode: upsert
+    asset_ttl_hours: 24
 
   - topic: tactical-events
     handler: tactical_events
@@ -57,6 +69,7 @@ mappings:
     consumer_group: projector-telemetry-windows
     decode_as: openddil.logistics.v1.WindowedTelemetry
     mode: upsert
+    asset_ttl_hours: 24
 
   # ADR-0023 Phase 6b §B — regional rollups. Produced by faust-regional's
   # aggregator App to redpanda-hq. Only the hq projector instance should
@@ -97,6 +110,7 @@ mappings:
     consumer_group: projector-capability-state
     decode_as: json
     mode: upsert
+    asset_ttl_hours: 24
 
 # =============================================================================
 # Edge assignment — for customer assets that don't carry edge_id
