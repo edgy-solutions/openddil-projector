@@ -10,6 +10,7 @@ from . import (
     capability_state,
     cm_state,
     logistics_status,
+    mrad_element_telemetry,
     region_fleet_summary,
     region_top_factors,
     region_wear_trends,
@@ -31,6 +32,8 @@ _REGISTRY: dict[str, Handler] = {
     "region_wear_trends":   region_wear_trends.handle,
     # Recipe v3 Sub-phase E — customer-overlay capability snapshots.
     "capability_state":     capability_state.handle,
+    # Phase 9 — openddil-mrad-sim per-element radar telemetry.
+    "mrad_element_telemetry": mrad_element_telemetry.handle,
 }
 
 
