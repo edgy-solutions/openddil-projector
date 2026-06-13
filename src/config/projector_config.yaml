@@ -112,15 +112,18 @@ mappings:
     mode: upsert
     asset_ttl_hours: 24
 
-  # openddil-mrad-sim publishes one whole-asset snapshot per tick as JSON,
-  # keyed by asset_id. Compacted -> upsert. Lands only on HQ broker (sim
-  # runs there); projector-hq is the only instance that sees data.
-  # element_id format is documented in openddil-mrad-sim/README.md and
-  # must match the SensorArrayView frontend output byte-for-byte.
-  - topic: mrad-element-telemetry
-    handler: mrad_element_telemetry
-    table: mrad_element_telemetry
-    consumer_group: projector-mrad-element-telemetry
+  # openddil-logistics-sim publishes one whole-asset snapshot per tick
+  # as JSON, keyed by asset_id. Compacted -> upsert. Lands only on HQ
+  # broker (sim runs there); projector-hq is the only instance that
+  # sees data. Topic carries snapshots for every asset_profiles[]
+  # the sim is configured with -- MRAD today, LTAMDS / Patriot to
+  # follow as logistics-sim config additions. element_id format is
+  # documented in openddil-logistics-sim/README.md and must match
+  # the SensorArrayView frontend output byte-for-byte.
+  - topic: asset-element-telemetry
+    handler: asset_element_telemetry
+    table: asset_element_telemetry
+    consumer_group: projector-asset-element-telemetry
     decode_as: json
     mode: upsert
     asset_ttl_hours: 24
