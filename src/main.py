@@ -89,6 +89,12 @@ class ConsumerWorker:
                 "group.id": mapping.consumer_group,
                 "auto.offset.reset": "earliest",
                 "enable.auto.commit": False,  # we commit after the DB write
+                # asset-element-telemetry envelopes carry the full per-
+                # asset element tree (~5MB for MRAD at 23k elements);
+                # default 1MB fetch.message.max.bytes would reject.
+                # Topic-level max.message.bytes must agree.
+                "fetch.message.max.bytes": 16 * 1024 * 1024,
+                "message.max.bytes": 16 * 1024 * 1024,
             }
         )
         self._consumer.subscribe([mapping.topic])
