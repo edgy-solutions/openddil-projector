@@ -7,6 +7,7 @@ function. Adding a topic = a new module here + a config entry.
 from __future__ import annotations
 
 from . import (
+    asset_element_inventory,
     asset_element_telemetry,
     capability_state,
     cm_state,
@@ -34,6 +35,9 @@ _REGISTRY: dict[str, Handler] = {
     "capability_state":     capability_state.handle,
     # Phase 9 — openddil-logistics-sim per-element sub-component telemetry.
     "asset_element_telemetry": asset_element_telemetry.handle,
+    # 2026-06-30: per-asset per-layer inventory aggregate (sim emits
+    # alongside the per-element snapshot; drives maintainer Inventory card).
+    "asset_element_inventory": asset_element_inventory.handle,
 }
 
 

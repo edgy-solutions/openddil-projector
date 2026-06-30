@@ -128,6 +128,22 @@ mappings:
     mode: upsert
     asset_ttl_hours: 24
 
+  # 2026-06-30: per-asset per-layer inventory aggregate. Sim publishes
+  # one JSON envelope per (asset_id, layer_name) per tick on
+  # asset-element-inventory. Handler upserts inventory_items rows keyed
+  # by `<asset_id>:<layer_name>` (deterministic id from envelope). Each
+  # tick repeats the same upsert (no row growth); changes only appear
+  # in available_count / allocated_count as elements transition tiers.
+  # Drives the maintainer view's "Local FOB Inventory" card from the
+  # same per-element signal as the 3D drill-down's tile colors.
+  - topic: asset-element-inventory
+    handler: asset_element_inventory
+    table: inventory_items
+    consumer_group: projector-asset-element-inventory
+    decode_as: json
+    mode: upsert
+    asset_ttl_hours: 24
+
 # =============================================================================
 # Edge assignment — for customer assets that don't carry edge_id
 # =============================================================================
