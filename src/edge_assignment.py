@@ -1,6 +1,6 @@
 """Edge assignment for customer assets that don't carry edge_id.
 
-Customer wire shapes (Unit telemetry, strike capability) carry no edge_id —
+Customer wire shapes (Unit telemetry, weapons capability) carry no edge_id —
 edges are an OpenDDIL-side construct, not customer reality. The projector
 decides the presentation edge_id for each customer asset using a pluggable
 strategy named in `projector_config.yaml` under `edge_assignment.strategy`.

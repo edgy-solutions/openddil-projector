@@ -96,10 +96,11 @@ mappings:
     decode_as: openddil.regional.v1.RegionWearTrends
     mode: upsert
 
-  # Recipe v3 Sub-phase E — customer-overlay capability snapshots. The
-  # customer-overlay strike-capability Bloblang produces asset-capability-snapshot
-  # as JSON (a customer-overlay-specific Silver shape, not a proto type),
-  # so decode_as is `json`. Compacted, keyed by asset_id -> upsert. The
+  # Recipe v3 Sub-phase E — weapons-capability snapshots. Source-specific
+  # producers (customer AMQP, DIS-derived, AFSim, Link 16 J3.7, etc.) are
+  # decomposed by their respective Bloblang into asset-capability-snapshot
+  # as JSON (a Silver shape, not a proto type), so decode_as is `json`.
+  # Compacted, keyed by asset_id -> upsert. The
   # topic is created on every cluster (topic-init parity), but only the
   # projector instance on the edge cluster the customer feed lands on
   # (edge-01 by convention) actually sees data — same single-writer
@@ -147,7 +148,7 @@ mappings:
 # =============================================================================
 # Edge assignment — for customer assets that don't carry edge_id
 # =============================================================================
-# Customer wire shapes (Unit telemetry, strike capability) carry no edge_id —
+# Customer wire shapes (Unit telemetry, weapons capability) carry no edge_id —
 # edges are an OpenDDIL-side construct, not customer reality. The projector
 # decides the presentation edge_id per asset using one of the registered
 # strategies (see src/edge_assignment.py). New strategies plug in via
