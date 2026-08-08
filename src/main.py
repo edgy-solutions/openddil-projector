@@ -65,6 +65,11 @@ BATCH_MAX_WAIT_MS = int(os.getenv("BATCH_MAX_WAIT_MS", "200"))
 # (topic, reason), not on every message.
 _logged_decode_reasons: set[tuple[str, str]] = set()
 
+# Same discipline for partition-level Kafka errors: once per
+# (topic, error-code). UNKNOWN_TOPIC_OR_PART otherwise repeats on every
+# poll for a topic absent from this broker, burying real errors.
+_logged_kafka_errors: set[tuple[str, int]] = set()
+
 
 class ConsumerWorker:
     """Drains one Kafka topic into one Postgres table."""
@@ -194,8 +199,24 @@ class ConsumerWorker:
                 if err is None:
                     real.append(msg)
                 elif err.code() != KafkaError._PARTITION_EOF:
-                    log.warning("kafka error on %s: %s",
-                                self.mapping.topic, err)
+                    # Warn-once per (topic, error-code).
+                    #
+                    # UNKNOWN_TOPIC_OR_PART repeats on every poll for a topic
+                    # that does not exist on this broker, which buries real
+                    # errors under thousands of identical lines. That is
+                    # normal and expected for a TIER-SCOPED projector: a tier
+                    # legitimately does not carry root-only rollup topics.
+                    #
+                    # The root fix is the tier-scoped PROJECTOR_CONFIG (a tier
+                    # simply does not list topics its broker lacks) — this is
+                    # the belt to that braces, so a misconfiguration is still
+                    # visible ONCE rather than either silenced or drowned.
+                    key = (self.mapping.topic, err.code())
+                    if key not in _logged_kafka_errors:
+                        _logged_kafka_errors.add(key)
+                        log.warning("kafka error on %s: %s "
+                                    "(further identical errors suppressed)",
+                                    self.mapping.topic, err)
             if not real:
                 continue
 
