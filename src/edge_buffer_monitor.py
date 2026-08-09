@@ -45,11 +45,51 @@ TOXIPROXY_API_URL = os.getenv("TOXIPROXY_API_URL", "http://toxiproxy:8475")
 HQ_LINK_PROXY = os.getenv("HQ_LINK_PROXY", "hq-link")
 PROBE_INTERVAL_S = float(os.getenv("EDGE_BUFFER_PROBE_INTERVAL_S", "2"))
 
+# Sentinel written to bridge_group_lag when the probe could not produce a
+# reading. Deliberately negative so it cannot be mistaken for a real lag by
+# anything that renders the number — a UI showing "-1" prompts a question,
+# a UI showing "0" ends one.
+LAG_UNKNOWN = -1
+
+# The probe runs every 2s. Without dedup a persistent misconfiguration would
+# emit 30 warnings a minute forever, which trains readers to filter the log
+# — the same way a permanent 0 trained them to trust the number.
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, fmt: str, *args) -> None:
+    if key not in _warned:
+        _warned.add(key)
+        log.warning(fmt + "  (further identical warnings suppressed)", *args)
+
+
+class BridgeGroupAbsent(RuntimeError):
+    """The configured consumer group has no committed offsets on the bridge
+    topics — so its lag is UNKNOWN, not zero.
+
+    This exists because the previous behaviour (return 0) made a broken
+    lookup indistinguishable from a healthy, caught-up link. The monitor
+    read 0 on every cluster for months while the bridge buffered normally,
+    because the group name it queried had never existed. Nothing errored;
+    the number was simply always plausible.
+
+    THE DESIGN RULE THIS ENCODES: an instrument whose failure mode is
+    indistinguishable from its healthy reading is not an instrument. A probe
+    must fail DISTINGUISHABLY from its own zero.
+    """
+
 
 def _probe_bridge_lag() -> int:
-    """Sum `bridge-group` lag across the bridge topics' partitions on
-    redpanda-edge. Raises on Kafka unreachable; returns 0 if the group has
-    not committed any offsets yet (bridge not started / nothing consumed)."""
+    """Sum the bridge consumer group's lag across the bridge topics.
+
+    Raises:
+        BridgeGroupAbsent: the group has committed nothing on these topics.
+            Callers must surface this as UNKNOWN — never as 0. A genuinely
+            caught-up bridge HAS committed offsets and returns 0 through the
+            normal path, so the two cases are distinguishable here and must
+            stay distinguishable upstream.
+        Exception: Kafka unreachable, timeouts, etc.
+    """
     admin = AdminClient({"bootstrap.servers": KAFKA_BROKERS})
     futures = admin.list_consumer_group_offsets(
         [ConsumerGroupTopicPartitions(BRIDGE_CONSUMER_GROUP)]
@@ -59,7 +99,12 @@ def _probe_bridge_lag() -> int:
     # Only the bridge's topics; ignore anything else the group ever touched.
     committed = [tp for tp in committed if tp.topic in BRIDGE_TOPICS]
     if not committed:
-        return 0
+        raise BridgeGroupAbsent(
+            f"consumer group {BRIDGE_CONSUMER_GROUP!r} has no committed offsets "
+            f"on {sorted(BRIDGE_TOPICS)}. Either the bridge has never run, or "
+            f"BRIDGE_CONSUMER_GROUP is wrong — the bridge commits under "
+            f"'bridge-group-<edge_id>', not the bare 'bridge-group'."
+        )
 
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
@@ -124,19 +169,32 @@ async def edge_buffer_loop(pool: PostgresPool) -> None:
     )
     while True:
         await asyncio.sleep(PROBE_INTERVAL_S)
-        lag = 0
+        # LAG_UNKNOWN, not 0. Writing 0 here is what made a blind probe look
+        # like a healthy caught-up link for months. Consumers of this row must
+        # treat a negative lag as "no reading", and `probe_healthy` is false
+        # alongside it.
+        lag = LAG_UNKNOWN
         severed = False
         healthy = True
         try:
             lag = await loop.run_in_executor(None, _probe_bridge_lag)
+        except BridgeGroupAbsent as exc:
+            healthy = False
+            lag = LAG_UNKNOWN
+            # WARNING, and deduplicated — not debug. The previous code logged
+            # probe failures at DEBUG, which is invisible at the default level,
+            # so the one signal that would have revealed the wrong group name
+            # was suppressed by default on every cluster.
+            _warn_once("bridge-group-absent", "edge-buffer: %s", exc)
         except Exception as exc:  # noqa: BLE001 - probe failure is non-fatal
             healthy = False
-            log.debug("bridge-lag probe failed: %s", exc)
+            lag = LAG_UNKNOWN
+            _warn_once("bridge-lag-probe", "edge-buffer: bridge-lag probe failed: %s", exc)
         try:
             severed = await loop.run_in_executor(None, _probe_hq_link_severed)
         except Exception as exc:  # noqa: BLE001
             healthy = False
-            log.debug("hq-link probe failed: %s", exc)
+            _warn_once("hq-link-probe", "edge-buffer: hq-link probe failed: %s", exc)
 
         try:
             await pool.execute(_build_write(lag, severed, healthy))
