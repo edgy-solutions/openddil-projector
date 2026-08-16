@@ -290,6 +290,27 @@ def test_telemetry_windows_renames_wear_trends_column():
 # these, a flat-topology assumption has hardened — that is what this guards.
 
 def test_every_per_asset_handler_emits_origin_provenance():
+    # Configure the resolver explicitly. This test predates edge_assignment —
+    # its comment above still says "constant defaults" — and when constants
+    # became a configured strategy it kept asserting edge-01 while depending
+    # on whatever the last test to touch the module singleton had installed.
+    # Run after test_edge_assignment.py it inherited that file's no-op
+    # (edge-unspecified); run alone it hit "configure() not called" instead.
+    # Two different failures from one missing setup, neither of which is what
+    # the test is about.
+    #
+    # What it IS about is the line in the comment above: every per-asset
+    # handler emits edge_id/region_id. Pinning the resolver to a known
+    # fallback keeps that assertion exact and removes the cross-file
+    # dependency — the values below are the resolver's answer, not a
+    # constant the handler invented.
+    # configure() rather than configure_from_config(): the latter requires a
+    # `strategy:` block, and this test wants the FALLBACK path specifically —
+    # no asset here carries a position or a prefix to strategise on.
+    from edge_assignment import FallbackAssignment, configure
+    configure(strategy=lambda ctx: None,
+              fallback=FallbackAssignment("edge-01", "region-01"))
+
     cases = [
         ("cm_state", "A1", {"asset_id": "A1", "lifecycle": 2}),
         ("logistics_status", "A1", {"status": {"asset_id": "A1"}}),
