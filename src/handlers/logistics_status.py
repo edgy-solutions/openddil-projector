@@ -14,7 +14,8 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_origin_or_derive
+from .base import (duration_to_seconds, now_utc, parse_timestamp,
+                   releasability_from, resolve_origin_or_derive)
 
 TABLE = "asset_logistics_status"
 
@@ -34,6 +35,11 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "asset_id": asset_id,
         **resolve_origin_or_derive(decoded.get("provenance") or {},
                                       asset_id, "logistics_status"),
+        # ADR-0029 §3. Fusion PROPAGATES the labels off the source telemetry
+        # event onto this derived row; the projector carries them the last
+        # step. A derived row without labels is a leak by omission — the
+        # severity of an asset is as national as the asset.
+        **releasability_from(decoded.get("provenance")),
         "platform_variant": status.get("platform_variant"),
         "overall_severity": status.get(
             "overall_severity", "LOGISTICS_SEVERITY_UNSPECIFIED"

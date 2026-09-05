@@ -36,7 +36,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, resolve_origin_or_derive
+from .base import now_utc, releasability_from, resolve_origin_or_derive
 
 TABLE = "asset_element_telemetry"
 HANDLER_LABEL = "asset_element_telemetry"
@@ -72,6 +72,10 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "observed_at": _observed_at_from_ns(decoded.get("observed_at_ns")),
         "updated_at": now_utc(),
         **prov,
+        # ADR-0029 §3. logistics-sim stamps these into a top-level
+        # `provenance` block from the same declaration the ingress
+        # mapping reads; the projector only carries them.
+        **releasability_from(decoded.get("provenance")),
     }
 
     return Write(

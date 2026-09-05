@@ -29,7 +29,8 @@ from typing import Any
 from edge_assignment import extract_wgs84
 from persistence import Write
 
-from .base import now_utc, parse_timestamp, resolve_origin_or_derive
+from .base import (now_utc, parse_timestamp, releasability_from,
+                   resolve_origin_or_derive)
 
 TABLE = "telemetry_latest_state"
 
@@ -65,6 +66,8 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     row = {
         "asset_id": asset_id,
         **origin,
+        # ADR-0029 §3: carried from the ingress stamp, never derived here.
+        **releasability_from(provenance),
         "platform_variant": asset.get("platform_variant"),
         "callsign": asset.get("callsign"),
         # ForceAffiliation enum -> its string name (e.g. "FORCE_FRIENDLY").

@@ -22,7 +22,8 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_ns_timestamp, resolve_provenance_from_top_level
+from .base import (now_utc, parse_ns_timestamp, releasability_from,
+                   resolve_provenance_from_top_level)
 
 log = logging.getLogger("projector.handler.cm_state")
 TABLE = "asset_cm_state"
@@ -67,6 +68,12 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     row = {
         "asset_id": asset_id,
         **resolve_provenance_from_top_level(decoded, asset_id, "cm_state"),
+        # ADR-0029 §3. asset-cm-state is JSON, not proto (ADR-0018), and
+        # cm-service stamps origin at the TOP LEVEL rather than in a nested
+        # provenance block. The labels follow that same shape, so the
+        # envelope itself is what carries them — passed to the shared helper
+        # so the absence semantics stay identical across all five tables.
+        **releasability_from(decoded),
         "baseline_id": decoded.get("baseline_id"),
         "lifecycle": _enum_name(
             _LIFECYCLE, decoded.get("lifecycle"), "LIFECYCLE_UNSPECIFIED"

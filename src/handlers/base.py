@@ -203,6 +203,44 @@ def resolve_provenance_from_top_level(envelope: dict, asset_id: str,
     }
 
 
+# -- releasability labels (ADR-0029 §3) ---------------------------------------
+# Stamped ONCE at ingress by the adapter that knows the source's national
+# origin; the projector CARRIES them, it does not derive them. That asymmetry
+# is the whole point of §3 and the reason this helper has no fallback,
+# no default and no lookup table: a second place that can decide a label is a
+# second answer to a question that must have exactly one.
+#
+# ABSENT STAYS ABSENT. A message with no labels produces no label columns in
+# the row, so they persist as NULL and the ADR-0029 §7 completeness gate
+# counts them. Substituting "" or "UNKNOWN" here would produce a
+# labelled-LOOKING row that no policy could ever release and no gate would
+# ever flag — the worst of both, and undetectable once written.
+#
+# Empty-string and empty-list are treated as absent, deliberately. proto3
+# cannot distinguish "producer said nothing" from "producer said empty" for
+# either field (see Provenance's field comments), so the consumer must not
+# pretend it can. Both read as UNLABELLED, which is the safe direction under
+# deny-unlabeled.
+def releasability_from(provenance_dict: dict | None) -> dict[str, Any]:
+    """Provenance labels -> row columns. Returns {} when unlabelled.
+
+    Callers splat this into the row dict, so an empty result simply omits
+    both columns rather than writing NULLs explicitly — same outcome in
+    Postgres, but it keeps "the projector had nothing to say" distinct from
+    "the projector said null" in the generated SQL, which matters when
+    reading a failing UPSERT."""
+    prov = provenance_dict or {}
+    nation = prov.get("originator_nation") or ""
+    if not nation:
+        return {}
+    releasable = prov.get("releasable_to") or []
+    # A declared nation with no additional release is the common coalition
+    # posture, not a defect: the originator's own access comes from the
+    # first clause of the §4 filter. Store [] rather than NULL so the row is
+    # LABELLED on both columns and the gate can tell the two apart.
+    return {"originator_nation": nation, "releasable_to": list(releasable)}
+
+
 def resolve_origin_or_derive(
     provenance_dict: dict | None,
     asset_id: str,

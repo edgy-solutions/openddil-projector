@@ -326,3 +326,99 @@ def test_every_per_asset_handler_emits_origin_provenance():
         assert write is not None, handler_name
         assert write.row["edge_id"] == "edge-01", handler_name
         assert write.row["region_id"] == "region-01", handler_name
+
+
+# -- releasability labels (ADR-0029 §3) ---------------------------------------
+#
+# The projector CARRIES labels; it never derives them. These tests pin both
+# halves of that, and the absence half is the one that matters: a handler that
+# quietly substituted "" or "UNKNOWN" would produce rows that look labelled,
+# that no policy could ever release, and that the §7 completeness gate would
+# count as DONE. Every one of these absence assertions is the red-check for a
+# defect that would otherwise be invisible in the database.
+
+def _labelled_prov(**extra):
+    return {"producer_id": "dis-ingestor-binary",
+            "originator_nation": "ATL",
+            "releasable_to": ["BDR"], **extra}
+
+
+def test_telemetry_latest_carries_releasability_labels():
+    decoded = {"asset": {"asset_id": "dis:1:1:1000"},
+               "provenance": _labelled_prov()}
+    write = get_handler("telemetry_latest")("dis:1:1:1000", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
+
+
+def test_telemetry_latest_absent_labels_stay_absent():
+    """No labels on the wire -> no label columns in the row -> NULL in
+    Postgres -> the §7 gate counts the row. This is the whole mechanism."""
+    decoded = {"asset": {"asset_id": "dis:9:9:9999"},
+               "provenance": {"producer_id": "dis-ingestor-binary"}}
+    write = get_handler("telemetry_latest")("dis:9:9:9999", decoded)
+    assert "originator_nation" not in write.row
+    assert "releasable_to" not in write.row
+
+
+def test_empty_string_nation_is_unlabelled_not_labelled_empty():
+    """proto3 cannot distinguish "said nothing" from "said empty", so the
+    consumer must not pretend it can. Both read as UNLABELLED — the safe
+    direction under deny-unlabeled."""
+    decoded = {"asset": {"asset_id": "a"},
+               "provenance": {"originator_nation": "", "releasable_to": []}}
+    write = get_handler("telemetry_latest")("a", decoded)
+    assert "originator_nation" not in write.row
+
+
+def test_declared_nation_with_no_further_release_is_still_labelled():
+    """The common coalition posture: an asset released to nobody else. Both
+    columns must be written, so the row is LABELLED rather than half-labelled
+    — otherwise the gate cannot tell it from an asset nobody declared."""
+    decoded = {"asset": {"asset_id": "a"},
+               "provenance": {"originator_nation": "ATL", "releasable_to": []}}
+    write = get_handler("telemetry_latest")("a", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == []
+
+
+def test_logistics_status_propagates_labels_onto_derived_row():
+    """A derived row without labels is a leak by omission. Fusion propagates
+    the source asset's labels; this pins that the projector persists them."""
+    decoded = {"status": {"asset_id": "dis:1:1:1000",
+                          "overall_severity": "LOGISTICS_SEVERITY_OK"},
+               "provenance": _labelled_prov(edge_id="edge-01",
+                                            region_id="region-east")}
+    write = get_handler("logistics_status")("dis:1:1:1000", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
+
+
+def test_cm_state_reads_labels_from_the_top_level_envelope():
+    """asset-cm-state is JSON, not proto (ADR-0018), and cm-service stamps
+    origin at the top level rather than in a nested provenance block. The
+    labels follow the same shape — but the ABSENCE semantics must be
+    identical to every other table, which is why one helper serves both."""
+    decoded = {"asset_id": "dis:1:1:1000", "edge_id": "edge-01",
+               "region_id": "region-east",
+               "originator_nation": "BDR", "releasable_to": []}
+    write = get_handler("cm_state")("dis:1:1:1000", decoded)
+    assert write.row["originator_nation"] == "BDR"
+    assert write.row["releasable_to"] == []
+
+
+def test_cm_state_absent_labels_stay_absent():
+    decoded = {"asset_id": "x", "edge_id": "edge-01", "region_id": "region-east"}
+    write = get_handler("cm_state")("x", decoded)
+    assert "originator_nation" not in write.row
+
+
+def test_label_columns_are_never_jsonb():
+    """releasable_to is text[], not jsonb. If it were json.dumps'd the GIN
+    array-containment index the read-path filter depends on would never
+    match, and the failure would look like "user sees nothing" rather than
+    like a type error — indistinguishable from correct denial."""
+    decoded = {"asset": {"asset_id": "a"}, "provenance": _labelled_prov()}
+    write = get_handler("telemetry_latest")("a", decoded)
+    assert "releasable_to" not in write.jsonb_columns
+    assert "originator_nation" not in write.jsonb_columns

@@ -20,7 +20,8 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_timestamp, resolve_origin_or_derive
+from .base import (now_utc, parse_timestamp, releasability_from,
+                   resolve_origin_or_derive)
 
 TABLE = "asset_capability_state"
 HANDLER_LABEL = "capability_state"
@@ -49,6 +50,8 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "observed_at": parse_timestamp(decoded.get("observed_at")),
         "updated_at": now_utc(),
         **prov,
+        # ADR-0029 §3: carried from the ingress stamp, never derived here.
+        **releasability_from(decoded.get("provenance")),
     }
 
     return Write(
