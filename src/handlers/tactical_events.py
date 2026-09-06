@@ -14,7 +14,8 @@ from typing import Any
 
 from persistence import Write
 
-from .base import parse_timestamp, resolve_provenance_from_top_level
+from .base import (parse_timestamp, releasability_from,
+                   resolve_provenance_from_top_level)
 
 TABLE = "tactical_events"
 
@@ -63,6 +64,18 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         # `subject` is optional in CloudEvents; the OpenDDIL convention is
         # subject = asset_id. Fall back to the Kafka key if a producer omits it.
         "subject": decoded.get("subject") or key or "",
+        # ADR-0029 §3: CARRIED from the producer's `data`, never derived
+        # here. A tactical event is about an asset and is exactly as
+        # releasable as that asset — fusion reads the labels from the same
+        # state that stamps asset_logistics_status, so the alert row and the
+        # status row cannot disagree about who may see it.
+        #
+        # An event whose producer has not been taught to stamp arrives
+        # unlabelled and deny-unlabeled hides it. That is the intended
+        # direction: a visible alert about an asset the viewer may not see
+        # is the leak, and an invisible one is a gap the completeness gate
+        # counts.
+        **releasability_from(data),
         "severity": _extract_severity(decoded),
         "time": parse_timestamp(decoded.get("time")),
         "data": decoded.get("data", {}),
