@@ -294,6 +294,28 @@ def aggregate_releasability_from(provenance_dict: dict | None) -> dict[str, Any]
             "releasable_to": list(prov.get("releasable_to") or [])}
 
 
+def aggregate_partition_key(provenance_dict: dict | None) -> str:
+    """The releasability class of an aggregate partial: sorted, comma-joined.
+
+    Derived from the label rather than carried as its own wire field, because
+    the class IS the audience -- `releasable_to` already says it, and a second
+    field stating the same thing is a second thing that can disagree with the
+    first.
+
+    It joins the primary key. These rollups are upserts, so keying a partial
+    on region_id alone would have the classes overwrite one another and leave
+    whichever arrived last standing as though it were the whole region: a
+    wrong number wearing a right one's shape, which is the failure the
+    partition exists to prevent.
+
+    The empty string is a REAL class -- the audience of contributors
+    releasable to nobody -- so it must key a row rather than be treated as
+    "no class".
+    """
+    prov = provenance_dict or {}
+    return ",".join(sorted(prov.get("releasable_to") or []))
+
+
 def resolve_origin_or_derive(
     provenance_dict: dict | None,
     asset_id: str,

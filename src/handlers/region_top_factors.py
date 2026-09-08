@@ -20,7 +20,8 @@ from typing import Any
 
 from persistence import Write
 
-from .base import aggregate_releasability_from, now_utc, parse_timestamp
+from .base import (aggregate_partition_key, aggregate_releasability_from,
+                    now_utc, parse_timestamp)
 
 TABLE = "region_top_factors"
 
@@ -39,13 +40,17 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "updated_at":  now_utc(),
         # The intersection the aggregator composed. Written even when EMPTY:
         # labelled-and-releasable-to-nobody is an answer, unlabelled is not.
+        # One partial per releasability class; the class joins the key so
+        # the classes upsert alongside each other rather than over one
+        # another. See aggregate_partition_key.
+        "releasability_class": aggregate_partition_key(decoded.get("provenance")),
         **aggregate_releasability_from(decoded.get("provenance")),
     }
 
     return Write(
         table=TABLE,
         mode="upsert",
-        key_columns=["region_id"],
+        key_columns=["region_id", "releasability_class"],
         row=row,
         jsonb_columns={"factors"},
     )
