@@ -22,7 +22,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, parse_timestamp
+from .base import aggregate_releasability_from, now_utc, parse_timestamp
 
 TABLE = "region_wear_trends"
 
@@ -39,6 +39,9 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "components":  components,
         "observed_at": parse_timestamp(decoded.get("observed_at")),
         "updated_at":  now_utc(),
+        # The intersection the aggregator composed. Written even when EMPTY:
+        # labelled-and-releasable-to-nobody is an answer, unlabelled is not.
+        **aggregate_releasability_from(decoded.get("provenance")),
     }
 
     return Write(

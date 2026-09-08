@@ -241,6 +241,39 @@ def releasability_from(provenance_dict: dict | None) -> dict[str, Any]:
     return {"originator_nation": nation, "releasable_to": list(releasable)}
 
 
+def aggregate_releasability_from(provenance_dict: dict | None) -> dict[str, Any]:
+    """Releasability for an AGGREGATE row. Never falls back to `{}`.
+
+    `releasability_from` returns nothing when `originator_nation` is absent,
+    which is right for an asset-bearing row: a row with no declared origin is
+    unlabelled. It is WRONG for a rollup, whose originator_nation is
+    deliberately never set -- an aggregate has no originator nation, and the
+    PEP predicate is a disjunction where a non-null one would ALONE grant
+    access and bypass the composed set. Using the asset helper here would
+    silently discard the intersection the aggregator computed and leave the
+    rollup unlabelled, which reads as a gap rather than as a decision.
+
+    So this always writes BOTH columns:
+
+        originator_nation  always NULL -- claiming nothing, on purpose
+        releasable_to      the composed set, possibly EMPTY
+
+    EMPTY IS NOT NULL, and the difference carries the whole meaning. `[]` is
+    LABELLED and releasable to no one: the intersection came out empty
+    because some contributor was ATL-only or unlabelled. NULL would mean
+    nobody composed anything. Under the §4 filter both deny, but only one of
+    them is an answer -- and the completeness gate counts them differently,
+    which is the point of writing the empty array rather than omitting it.
+    """
+    prov = provenance_dict or {}
+    releasable = prov.get("releasable_to")
+    if releasable is None:
+        # The producer did not compose. Unlabelled, and the gate should say so
+        # rather than this function inventing an empty set on its behalf.
+        return {}
+    return {"originator_nation": None, "releasable_to": list(releasable)}
+
+
 def resolve_origin_or_derive(
     provenance_dict: dict | None,
     asset_id: str,
