@@ -258,20 +258,40 @@ def aggregate_releasability_from(provenance_dict: dict | None) -> dict[str, Any]
         originator_nation  always NULL -- claiming nothing, on purpose
         releasable_to      the composed set, possibly EMPTY
 
-    EMPTY IS NOT NULL, and the difference carries the whole meaning. `[]` is
-    LABELLED and releasable to no one: the intersection came out empty
-    because some contributor was ATL-only or unlabelled. NULL would mean
-    nobody composed anything. Under the §4 filter both deny, but only one of
-    them is an answer -- and the completeness gate counts them differently,
-    which is the point of writing the empty array rather than omitting it.
+    EMPTY IS NOT NULL IN THE DATABASE, and that difference carries the whole
+    meaning. `[]` is LABELLED and releasable to no one: the intersection came
+    out empty because a contributor was ATL-only or unlabelled. NULL means
+    nobody composed anything. Under the §4 filter both deny, but only one is
+    an answer, and the completeness gate counts them differently.
+
+    ON THE WIRE, HOWEVER, ABSENT AND EMPTY ARE THE SAME BYTES, so this cannot
+    branch on them -- see the comment below, which is the more useful half of
+    this docstring.
     """
+    # An earlier version of this function returned {} when `releasable_to` was
+    # missing, on the reasoning that "the producer did not compose" deserves
+    # to stay unlabelled rather than have an empty set invented for it. That
+    # branch is UNREACHABLE and the attempt was actively harmful: proto3 does
+    # not serialise an empty repeated field, so a composed-and-empty
+    # intersection arrives byte-identical to one that was never composed. The
+    # distinction was written into the docstring, into the migration, and into
+    # the commit message -- and the wire had already documented that it cannot
+    # carry it, 300 lines above the field, for these exact two columns.
+    #
+    # Measured: the first rollup emitted after the change landed as
+    # releasable_to = NULL, which is the value this function exists to avoid
+    # writing.
+    #
+    # So the reading is taken from the PRODUCER instead of from the payload.
+    # The only writer of these tables is the regional aggregator, and it
+    # composes on every emission -- so absent means the intersection was
+    # empty. And for an aggregator too old to compose at all, `[]` denies
+    # everyone, which is the safe reading of an unknown. Both cases want the
+    # same value, which is why the branch was not worth keeping even in
+    # principle.
     prov = provenance_dict or {}
-    releasable = prov.get("releasable_to")
-    if releasable is None:
-        # The producer did not compose. Unlabelled, and the gate should say so
-        # rather than this function inventing an empty set on its behalf.
-        return {}
-    return {"originator_nation": None, "releasable_to": list(releasable)}
+    return {"originator_nation": None,
+            "releasable_to": list(prov.get("releasable_to") or [])}
 
 
 def resolve_origin_or_derive(
