@@ -36,6 +36,16 @@ log = logging.getLogger("projector.edge_buffer")
 
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "redpanda-edge:9092")
 BRIDGE_CONSUMER_GROUP = os.getenv("BRIDGE_CONSUMER_GROUP", "bridge-group")
+
+# WHAT THIS TIER CALLS ITS OUTBOUND LINK. A leaf's link is edge -> HQ; an
+# intermediate's is region -> HQ, and its inbound side carries a subtree.
+# Hardcoding "edge" put a leaf's label on a region's screen, which is the
+# mode-confusion class: a panel that is correct about its numbers and wrong
+# about whose numbers they are.
+#
+# Defaults to "edge" so a deployment that has not been told still renders
+# what it always rendered, rather than a blank where a label used to be.
+BUFFER_ROW_ID = os.getenv("BUFFER_ROW_ID", "edge")
 BRIDGE_TOPICS = [
     t.strip()
     for t in os.getenv("BRIDGE_TOPICS", "raw-sensor-stream,tactical-events").split(",")
@@ -151,7 +161,7 @@ def _build_write(lag: int, severed: bool, healthy: bool) -> Write:
         mode="upsert",
         key_columns=["id"],
         row={
-            "id": "edge",
+            "id": BUFFER_ROW_ID,
             "bridge_group_lag": int(lag),
             "hq_link_severed": bool(severed),
             "probe_healthy": bool(healthy),
