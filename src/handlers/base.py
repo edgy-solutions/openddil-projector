@@ -158,6 +158,58 @@ def warn_provenance_fallback(handler_label: str, edge_id: str,
         _fallback_last_warn[key] = (last[0], last[1] + 1)
 
 
+# ---------------------------------------------------------------------------
+# REFUSALS: rows this projector declines to write, counted so the decline is
+# visible. A refusal that nobody counts is a silent drop.
+# ---------------------------------------------------------------------------
+# WHY A REFUSAL AND NOT A FALLBACK (the 2026-09-08 residue, found 2026-09-18).
+#
+# The tactical_events handler resolved its key as
+#
+#     "subject": decoded.get("subject") or key or ""
+#
+# A relay bug was producing null-keyed messages. Every one of them landed as a
+# row with subject = "" and a fresh uuid id, so ON CONFLICT (id) DO NOTHING
+# deduped nothing: 18,562 rows in one region store, from a single burst,
+# invisible for ten days because the read path had never carried real data.
+#
+# The relay bug was fixed. THAT IS NOT THE SAME AS FIXING THIS. A fallback
+# that answers where it cannot name the class it is answering for (AUDIT-
+# 2026-08-11) will turn the NEXT null-key defect anywhere in the chain into
+# the same 18k rows. An empty subject is not a subject; the honest response is
+# to decline the row and say how many were declined.
+#
+# Counted rather than only logged, because the count is what a check can read.
+# A log line is evidence for whoever is tailing at the time; a counter is
+# evidence for whoever asks afterwards.
+_refused: dict[tuple[str, str], int] = {}
+_refuse_last_warn: dict[tuple[str, str], float] = {}
+_REFUSE_WARN_WINDOW_S = 60.0
+
+
+def refuse_row(handler_label: str, reason: str, detail: str = "") -> None:
+    """Record (and rate-limit-log) a row this handler declined to write."""
+    log = _logging.getLogger(handler_label)
+    key = (handler_label, reason)
+    _refused[key] = _refused.get(key, 0) + 1
+    now = _time.monotonic()
+    last = _refuse_last_warn.get(key)
+    if last is None or (now - last) >= _REFUSE_WARN_WINDOW_S:
+        log.warning("REFUSED row: %s (total=%d this process)%s",
+                    reason, _refused[key], f" {detail}" if detail else "")
+        _refuse_last_warn[key] = now
+
+
+def refused_rows() -> dict[str, int]:
+    """{'handler:reason': count} for the /healthz surface and for checks.
+
+    Non-zero here is a FINDING, not a statistic: it means something upstream
+    is emitting rows this projector cannot honestly key or label, and the fix
+    is upstream, not here.
+    """
+    return {f"{h}:{r}": n for (h, r), n in sorted(_refused.items())}
+
+
 def resolve_provenance_from_proto(provenance_msg: Any, asset_id: str,
                                     handler_label: str) -> dict[str, str]:
     """Read edge_id/region_id from a proto Provenance message; fall back to

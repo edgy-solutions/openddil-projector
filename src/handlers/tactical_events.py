@@ -14,7 +14,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import (parse_timestamp, releasability_from,
+from .base import (parse_timestamp, refuse_row, releasability_from,
                    resolve_provenance_from_top_level)
 
 TABLE = "tactical_events"
@@ -54,7 +54,25 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # ADR-0023 Phase 6b §A: CloudEvent producers (faust-edge anomalies,
     # cm-service config alerts) stamp edge_id/region_id into the `data`
     # block. Read from data dict with rate-limited env-default fallback.
+    # AN EMPTY SUBJECT IS NOT A SUBJECT -- refuse, do not substitute.
+    #
+    # This line used to end `or ""`. A relay producing null-keyed messages
+    # then wrote 18,562 rows with subject = "" into one region store from a
+    # single burst on 2026-09-08, each with a fresh uuid so ON CONFLICT (id)
+    # deduped nothing. Nobody saw them for ten days: the read path had never
+    # carried real data, and the first client that loaded the region screen
+    # made its PEP buffer 10 MiB and die.
+    #
+    # The relay bug is fixed. This refusal is what stops the NEXT one, from
+    # anywhere in the chain, doing it again. A tactical event is ABOUT an
+    # asset; one that cannot say which asset is not a degraded event, it is an
+    # unanswerable one, and writing it with a placeholder makes the store
+    # claim something the message never said.
     asset_subject = decoded.get("subject") or key or ""
+    if not asset_subject:
+        refuse_row("tactical_events", "empty subject",
+                   f"type={decoded.get('type', '?')} id={event_id}")
+        return None
     data = decoded.get("data") if isinstance(decoded.get("data"), dict) else {}
     row = {
         "id": event_id,
@@ -62,8 +80,11 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "source": decoded.get("source", ""),
         "type": decoded.get("type", ""),
         # `subject` is optional in CloudEvents; the OpenDDIL convention is
-        # subject = asset_id. Fall back to the Kafka key if a producer omits it.
-        "subject": decoded.get("subject") or key or "",
+        # subject = asset_id, with the Kafka key as the fallback. Resolved and
+        # VALIDATED once above -- reused here rather than recomputed, because
+        # a second copy of the expression is a second copy of the rule, and
+        # the refusal above would not apply to it.
+        "subject": asset_subject,
         # ADR-0029 §3: CARRIED from the producer's `data`, never derived
         # here. A tactical event is about an asset and is exactly as
         # releasable as that asset — fusion reads the labels from the same

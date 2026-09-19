@@ -261,6 +261,56 @@ def test_tactical_events_subject_falls_back_to_key():
     assert write.row["subject"] == "FALLBACK-ASSET"
 
 
+def test_tactical_events_refuses_empty_subject():
+    """THE 2026-09-08 RESIDUE, pinned.
+
+    A relay producing null-keyed messages met `subject or key or ""` and every
+    one landed as a row with subject = "" and a fresh uuid id -- so ON CONFLICT
+    (id) DO NOTHING deduped nothing. 18,562 rows in one region store from a
+    single burst, unseen for ten days because the read path had never carried
+    real data; the first client to load that screen made its PEP buffer 10 MiB
+    and get OOMKilled.
+
+    The relay bug was fixed, and that is NOT the same as fixing this: a
+    fallback that answers where it cannot name the class it answers for
+    (AUDIT-2026-08-11) will turn the next null-key defect anywhere in the
+    chain into the same rows. An empty subject is not a subject.
+    """
+    from handlers.base import refused_rows
+
+    before = refused_rows().get("tactical_events:empty subject", 0)
+    envelope = {"id": "ce-null-key", "source": "x", "type": "y",
+                "time": "2026-05-14T03:00:00Z"}
+    write = get_handler("tactical_events")("", envelope)
+
+    assert write is None, "a row with no resolvable subject must be REFUSED"
+    after = refused_rows().get("tactical_events:empty subject", 0)
+    assert after == before + 1, (
+        "the refusal must be COUNTED -- a refusal nobody counts is a silent "
+        "drop, which is the failure mode this replaced, not an improvement "
+        "on it")
+
+
+def test_tactical_events_still_writes_when_subject_is_resolvable():
+    """The must-NOT-fire half.
+
+    The refusal must reject ONLY the unanswerable case. Without this, the fix
+    could be written to drop anything without an explicit `subject` attribute
+    and still pass the test above -- silently discarding every producer that
+    relies on the Kafka key, which is the documented convention.
+    """
+    envelope = {"id": "ce-2", "source": "x", "type": "y",
+                "time": "2026-05-14T03:00:00Z"}
+    write = get_handler("tactical_events")("REAL-ASSET", envelope)
+    assert write is not None
+    assert write.row["subject"] == "REAL-ASSET"
+
+    envelope_with_subject = dict(envelope, id="ce-3", subject="SUBJ-ASSET")
+    write = get_handler("tactical_events")("", envelope_with_subject)
+    assert write is not None
+    assert write.row["subject"] == "SUBJ-ASSET"
+
+
 # -- telemetry_windows --------------------------------------------------------
 
 def test_telemetry_windows_renames_wear_trends_column():
