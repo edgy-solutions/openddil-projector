@@ -61,7 +61,23 @@ mappings:
     consumer_group: projector-tactical-events
     decode_as: cloudevents.json
     mode: append
-    retention_hours: 24
+    # ROOT RETENTION -- the long end of a gradient declared in
+    # openddil-helm/openddil-demo/values.yaml (eventRetention): root longest,
+    # intermediates medium, leaves shortest, sized by role and by what each
+    # tier can hold.
+    #
+    # WAS 24. That was never a decision -- it was a default here while the
+    # TIERS had no retention_hours at all, so the pruner skipped their tables
+    # entirely and one region store reached 18,573 rows. Both halves read the
+    # same field name from configs in different repos and only one filled it
+    # in, which is why nothing ever disagreed.
+    #
+    # 24h also made the root's tactical_events empty within a day, so its
+    # alert feed was blank most of the time and the gate's `sparse` category
+    # fired constantly -- a category that always fires stops carrying
+    # information. 720h is 30 days, matching the tactical-events topic's own
+    # retention.ms, so the store and the log agree on how long an alert lives.
+    retention_hours: 720
 
   - topic: asset-telemetry-windows
     handler: telemetry_windows
