@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from edge_assignment import extract_wgs84
+from lifecycle_status import is_dis_destroyed_signal
 from persistence import Write
 
 from .base import (now_utc, parse_timestamp, releasability_from,
@@ -63,6 +64,15 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # SPA's GROUND DIAGNOSTICS panel renders "—" for each axis.
     op_state = decoded.get("operational_state") or {}
 
+    # ADR-0044 lifecycle slice 1: this projector instance's own clock, used
+    # for every "as of right now, from THIS reader's point of view" stamp
+    # below. Reusing one value keeps reporting_status_at, operational_status_at
+    # and updated_at from this single message consistent with each other;
+    # it deliberately does NOT flow into last_sample_at, which stays the
+    # leaf's own sample_time so a severed relay hop freezes it correctly
+    # (see reporting_sweep.py).
+    now = now_utc()
+
     row = {
         "asset_id": asset_id,
         **origin,
@@ -87,8 +97,27 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "health_state":          op_state.get("health_state"),
         "actively_receiving":    op_state.get("actively_receiving"),
         "actively_transmitting": op_state.get("actively_transmitting"),
-        "updated_at": now_utc(),
+        # ADR-0044 lifecycle slice 1: reporting_status moves on the arrival
+        # of a record, unconditionally — any message, from any producer,
+        # means this reader just heard from the asset. Never gated on
+        # health/damage: a destroyed asset that is still transmitting is
+        # "destroyed" + "reporting" at once (ADR §2's "whole argument"), so
+        # this key is set on every call, with no condition attached.
+        "reporting_status": "reporting",
+        "reporting_status_at": now,
+        "updated_at": now,
     }
+
+    # ADR-0044 lifecycle slice 1: operational_status is the one column that
+    # must NOT be written on every message — only on an actual signal about
+    # the asset. Omitting the keys (not writing "operational") when there is
+    # no such signal is what makes silence, or an ordinary non-destroyed
+    # update, leave a prior "destroyed" value alone; Postgres's UPSERT only
+    # touches columns present in this dict (see PostgresPool.build_sql), so
+    # omission is the mechanism, not an afterthought.
+    if is_dis_destroyed_signal(op_state, provenance):
+        row["operational_status"] = "destroyed"
+        row["operational_status_at"] = now
 
     return Write(
         table=TABLE,

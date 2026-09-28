@@ -162,6 +162,70 @@ class PostgresPool:
                     f"non-retryable write to {write.table}: {exc}"
                 ) from exc
 
+    @staticmethod
+    def build_staleness_sweep_sql(
+        table: str,
+        *,
+        sample_column: str,
+        reporting_column: str,
+        reporting_at_column: str,
+    ) -> str:
+        """UPDATE, never DELETE — a row that passes out of the staleness
+        window flips its reporting_status; it does not disappear (ADR-0044
+        §1, "no deletes... anywhere, on the asset path"). Pure — unit
+        testable without a live Postgres, same as `build_sql`.
+
+        $1 = the "not_reporting" value, $2 = this reader's own now, $3 =
+        this reader's own stale_after_s. Only rows not already flagged are
+        touched, so a repeated sweep over an already-stale row is a no-op
+        rather than repeatedly bumping reporting_at_column.
+        """
+        return (
+            f'UPDATE "{table}" SET '
+            f'"{reporting_column}" = $1, "{reporting_at_column}" = $2 '
+            f'WHERE "{sample_column}" < $2 - ($3 || \' seconds\')::interval '
+            f'AND "{reporting_column}" != $1'
+        )
+
+    async def sweep_reporting_staleness(
+        self,
+        table: str,
+        *,
+        sample_column: str,
+        reporting_column: str,
+        reporting_at_column: str,
+        not_reporting_value: str,
+        stale_after_s: float,
+        now: Any,
+    ) -> int:
+        """Flip rows whose sample is older than `stale_after_s`, as measured
+        by THIS pool's own `now`, to `not_reporting_value`. Returns rows
+        touched.
+
+        Deliberately does not also flip stale rows back to "reporting" —
+        recovery is the arrival path's job (a handler writes
+        reporting_status="reporting" unconditionally on every message; see
+        handlers/telemetry_latest.py). This sweep only ever moves in the
+        stale direction, which is what makes it safe to run independently,
+        on its own interval, per reading tier (ADR §4).
+        """
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.sweep_reporting_staleness before connect()"
+            )
+        sql = self.build_staleness_sweep_sql(
+            table,
+            sample_column=sample_column,
+            reporting_column=reporting_column,
+            reporting_at_column=reporting_at_column,
+        )
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, not_reporting_value, now, str(stale_after_s))
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):  # pragma: no cover
+            return 0
+
     async def prune_older_than(self, table: str, time_column: str,
                                hours: int) -> int:
         """Delete rows older than `hours`. Returns rows deleted."""

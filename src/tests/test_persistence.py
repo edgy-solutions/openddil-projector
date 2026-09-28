@@ -73,3 +73,23 @@ def test_jsonb_none_passes_through_as_none():
         row={"id": "A1", "blob": None}, jsonb_columns={"blob"},
     )
     assert PostgresPool._bind_values(write) == ["A1", None]
+
+
+def test_staleness_sweep_sql_is_update_not_delete():
+    """ADR-0044 §1: no deletes on the asset path. The staleness sweep must
+    be an UPDATE — this pins that down at the SQL-text level so a future
+    edit can't turn it into a DELETE without a test noticing."""
+    sql = PostgresPool.build_staleness_sweep_sql(
+        "telemetry_latest_state",
+        sample_column="last_sample_at",
+        reporting_column="reporting_status",
+        reporting_at_column="reporting_status_at",
+    )
+    assert sql.strip().upper().startswith("UPDATE")
+    assert "DELETE" not in sql.upper()
+    assert '"telemetry_latest_state"' in sql
+    assert '"reporting_status" = $1' in sql
+    assert '"reporting_status_at" = $2' in sql
+    # only rows not already flagged are touched, and only by staleness
+    assert '"last_sample_at" < $2' in sql
+    assert '"reporting_status" != $1' in sql

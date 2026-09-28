@@ -10,9 +10,12 @@ compacted-topic messages are deduped by key (latest wins) before writing, so
 an asset spamming updates costs one UPSERT, not N. Offsets stay contiguous
 within the batch, so dedup never risks skipping another key's message.
 
-Background tasks: a retention pruner for append-mode tables, and a consumer-
-lag gauge updater. SIGHUP reloads config (adds/removes consumers, refreshes
-settings) without dropping unchanged connections.
+Background tasks: a retention pruner for append-mode tables, a consumer-
+lag gauge updater, and (ADR-0044 lifecycle slice 1) a reporting-status
+staleness sweep over telemetry_latest_state, evaluated on this instance's
+own clock and interval only (see reporting_sweep.py). SIGHUP reloads config
+(adds/removes consumers, refreshes settings) without dropping unchanged
+connections.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from metrics import (
 )
 from persistence import PostgresPool
 from persistence.postgres import PostgresWriteError
+from reporting_sweep import reporting_sweep_loop
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -373,6 +377,12 @@ async def main() -> None:
     tasks = [asyncio.create_task(w.run()) for w in workers]
     tasks.append(asyncio.create_task(prune_loop(pool, config.mappings)))
     tasks.append(asyncio.create_task(lag_loop(workers)))
+    # ADR-0044 lifecycle slice 1: reporting_status staleness sweep. Runs
+    # unconditionally on every projector instance — each tier's own sweep
+    # over its own Postgres is what makes reporting_status a per-reader
+    # fact instead of a shared one (ADR §4); there is no "primary" sweeper
+    # to gate, unlike edge_buffer_loop below.
+    tasks.append(asyncio.create_task(reporting_sweep_loop(pool)))
     # Phase 4c.5: edge->HQ DDIL link/buffer monitor.
     # ADR-0023 Phase 6a: with 3 projector instances (one per edge cluster),
     # only one should run the buffer monitor — they all write to the same
