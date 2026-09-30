@@ -43,6 +43,30 @@ def test_append_sql_is_do_nothing():
     assert "DO UPDATE" not in sql
 
 
+def test_update_sql_is_plain_update_by_key():
+    """mode='update' — a plain UPDATE that can only touch a row that
+    already exists (no ON CONFLICT / no INSERT at all), for a claim that
+    must never be able to create a row (e.g. a Remove Entity for an unknown
+    asset_id; see handlers/telemetry_latest.py)."""
+    write = Write(
+        table="telemetry_latest_state",
+        mode="update",
+        key_columns=["asset_id"],
+        row={"asset_id": "A1", "operational_status": "removed",
+             "operational_status_at": "2026-09-30T00:00:00Z",
+             "updated_at": "2026-09-30T00:00:00Z"},
+    )
+    sql = PostgresPool.build_sql(write)
+    assert sql == (
+        'UPDATE "telemetry_latest_state" SET '
+        '"operational_status" = $2, "operational_status_at" = $3, '
+        '"updated_at" = $4 '
+        'WHERE "asset_id" = $1'
+    )
+    assert "INSERT" not in sql
+    assert "ON CONFLICT" not in sql
+
+
 def test_composite_key_conflict_target():
     write = Write(
         table="some_table",

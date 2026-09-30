@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from persistence import Write
 from persistence.postgres import PostgresPool
 
 DSN = os.environ.get("PROJECTOR_TEST_PG_DSN")
@@ -113,3 +114,66 @@ async def test_sweep_never_deletes(pool_and_table):
     await _seed(pool, table, now)
     await _sweep(pool, table, now + timedelta(hours=48))
     assert set(await _statuses(pool, table)) == {"stale", "fresh"}
+
+
+# -- Write mode "update" (removal-for-unknown-asset must not create a row) --
+#
+# The string-shape test (test_persistence.py) pins the SQL text; only a real
+# server proves the semantic this mode exists for — that an UPDATE with no
+# matching row genuinely creates nothing, versus e.g. a typo'd WHERE clause
+# that happens to also return 0 for the wrong reason.
+
+@pytest.fixture
+async def update_pool_and_table():
+    pool = PostgresPool(_require_dsn())
+    await pool.connect()
+    table = f"update_test_{uuid.uuid4().hex[:12]}"
+    async with pool._pool.acquire() as conn:
+        await conn.execute(
+            f'CREATE TABLE "{table}" ('
+            "asset_id text PRIMARY KEY, "
+            "operational_status text)"
+        )
+    try:
+        yield pool, table
+    finally:
+        async with pool._pool.acquire() as conn:
+            await conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        await pool.close()
+
+
+async def test_update_mode_on_missing_key_returns_zero_and_creates_no_row(update_pool_and_table):
+    pool, table = update_pool_and_table
+    write = Write(
+        table=table,
+        mode="update",
+        key_columns=["asset_id"],
+        row={"asset_id": "unknown-asset", "operational_status": "removed"},
+    )
+    rows_affected = await pool.execute(write)
+    assert rows_affected == 0
+    async with pool._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f'SELECT * FROM "{table}" WHERE asset_id = $1', "unknown-asset")
+    assert row is None
+
+
+async def test_update_mode_on_existing_row_returns_one(update_pool_and_table):
+    pool, table = update_pool_and_table
+    async with pool._pool.acquire() as conn:
+        await conn.execute(
+            f'INSERT INTO "{table}" (asset_id, operational_status) VALUES ($1, $2)',
+            "known-asset", "operational",
+        )
+    write = Write(
+        table=table,
+        mode="update",
+        key_columns=["asset_id"],
+        row={"asset_id": "known-asset", "operational_status": "removed"},
+    )
+    rows_affected = await pool.execute(write)
+    assert rows_affected == 1
+    async with pool._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f'SELECT operational_status FROM "{table}" WHERE asset_id = $1', "known-asset")
+    assert row["operational_status"] == "removed"

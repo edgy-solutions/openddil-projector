@@ -35,6 +35,11 @@ ROWS_PRUNED = Counter(
     "Append-mode rows deleted by the retention pruner",
     ["table"],
 )
+REMOVAL_UNKNOWN_ASSET_DROPPED = Counter(
+    "projector_removal_unknown_asset_dropped_total",
+    "Remove Entity claims for an asset_id with no row, dropped (no row created)",
+    ["table"],
+)
 
 
 def start_metrics_server() -> int:

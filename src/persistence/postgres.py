@@ -37,9 +37,15 @@ class Write:
     """What a handler wants persisted.
 
     table     — target table name
-    mode      — "upsert" (ON CONFLICT DO UPDATE by `key_columns`) or
+    mode      — "upsert" (ON CONFLICT DO UPDATE by `key_columns`),
                 "append" (plain INSERT; `key_columns` still names the PK so
-                a duplicate CloudEvent id is a no-op via ON CONFLICT DO NOTHING)
+                a duplicate CloudEvent id is a no-op via ON CONFLICT DO NOTHING),
+                or "update" (plain UPDATE by `key_columns`; creates no row —
+                a no-op, not an insert, when no row matches the key. For a
+                claim that must be able to modify an existing asset without
+                ever being able to conjure a new one, such as a Remove
+                Entity for an asset_id this projector has no prior record
+                of — see handlers/telemetry_latest.py's status-only branch)
     key_columns — primary-key column(s); the conflict target
     row       — column -> value. Values destined for jsonb columns are
                 plain Python lists/dicts; `jsonb_columns` says which.
@@ -116,6 +122,28 @@ class PostgresPool:
                 f"ON CONFLICT ({conflict}) DO NOTHING"
             )
 
+        if write.mode == "update":
+            # Plain UPDATE — cannot create a row (a no-op when no row
+            # matches `key_columns`, never an insert). Reuse `placeholders`
+            # (one per `cols` position) rather than renumbering, because
+            # `_bind_values` binds values in that same `cols`/`row` order —
+            # a key column keeps whatever placeholder its row position
+            # already got, whether it lands in SET or WHERE below.
+            set_clause = ", ".join(
+                f'"{c}" = {placeholders[i]}'
+                for i, c in enumerate(cols)
+                if c not in write.key_columns
+            )
+            where_clause = " AND ".join(
+                f'"{c}" = {placeholders[i]}'
+                for i, c in enumerate(cols)
+                if c in write.key_columns
+            )
+            return (
+                f'UPDATE "{write.table}" SET {set_clause} '
+                f"WHERE {where_clause}"
+            )
+
         # upsert: overwrite every non-key column on conflict.
         updates = ", ".join(
             f'"{c}" = EXCLUDED."{c}"'
@@ -140,8 +168,16 @@ class PostgresPool:
 
     # -- execution ----------------------------------------------------------
 
-    async def execute(self, write: Write) -> None:
-        """Execute a Write, retrying on transient failure until it succeeds."""
+    async def execute(self, write: Write) -> int | None:
+        """Execute a Write, retrying on transient failure until it succeeds.
+
+        Returns the rows-affected count for mode "update" (asyncpg's status
+        string, e.g. "UPDATE 0" / "UPDATE 1", parsed the same way
+        `prune_older_than` and `sweep_reporting_staleness` already parse
+        their own DELETE/UPDATE counts). Other modes are unchanged: no
+        caller of "upsert"/"append" reads a return value today, so this
+        stays None for them rather than guessing at a meaning.
+        """
         if self._pool is None:
             raise RuntimeError("PostgresPool.execute called before connect()")
         sql = self.build_sql(write)
@@ -150,8 +186,13 @@ class PostgresPool:
         while True:
             try:
                 async with self._pool.acquire() as conn:
-                    await conn.execute(sql, *values)
-                return
+                    result = await conn.execute(sql, *values)
+                if write.mode == "update":
+                    try:
+                        return int(result.split()[-1])
+                    except (ValueError, IndexError):  # pragma: no cover
+                        return 0
+                return None
             except (OSError, asyncpg.PostgresConnectionError) as exc:
                 # Transient — Postgres restarting, network blip. Retry.
                 delay = self._backoff(attempt)

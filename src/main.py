@@ -42,6 +42,7 @@ from metrics import (
     DECODE_ERRORS,
     MESSAGES_CONSUMED,
     POSTGRES_ERRORS,
+    REMOVAL_UNKNOWN_ASSET_DROPPED,
     ROWS_PRUNED,
     TOPIC_LAG,
     UPSERTS,
@@ -175,12 +176,20 @@ class ConsumerWorker:
             return
 
         try:
-            await self._pool.execute(write)
+            rows_affected = await self._pool.execute(write)
         except PostgresWriteError as exc:
             # Non-retryable (constraint violation, bad data). Log-and-skip;
             # transient errors are retried inside execute() and never reach here.
             log.error("postgres write skipped for %s: %s", write.table, exc)
             POSTGRES_ERRORS.labels(operation=f"write:{write.table}").inc()
+            return
+        if write.mode == "update" and rows_affected == 0:
+            # A removal (or any other "update"-mode write) for an asset_id
+            # with no existing row — the "update" mode's whole point is that
+            # this is a no-op, not an insert. Not a UPSERT: no row was
+            # written.
+            log.info("removal for unknown asset %s dropped", key)
+            REMOVAL_UNKNOWN_ASSET_DROPPED.labels(table=write.table).inc()
             return
         UPSERTS.labels(table=write.table).inc()
 

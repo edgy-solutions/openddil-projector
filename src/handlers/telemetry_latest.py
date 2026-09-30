@@ -28,6 +28,7 @@ from typing import Any
 
 from edge_assignment import extract_wgs84
 from lifecycle_status import (OPERATIONAL_STATUS_DESTROYED,
+                               OPERATIONAL_STATUS_REMOVED,
                                is_dis_destroyed_signal,
                                operational_status_from_op_state)
 from persistence import Write
@@ -110,9 +111,19 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
             "operational_status_at": now,
             "updated_at": now,
         }
+        # A Remove Entity (operational_status == "removed") must not create a
+        # fleet member. The upstream kind gate is stateless — it admits every
+        # removal by PDU type alone, with no knowledge of whether this
+        # asset_id has ever been seen — so resolution against existing
+        # asset ids has to happen here, at write time: "update" can only
+        # touch a row that already exists, so a removal for an unknown
+        # asset_id is a no-op instead of an INSERT (see PostgresPool
+        # build_sql/execute for the "update" mode itself). Every other
+        # status-only claim still upserts as before.
+        mode = "update" if op_status_claim == OPERATIONAL_STATUS_REMOVED else "upsert"
         return Write(
             table=TABLE,
-            mode="upsert",
+            mode=mode,
             key_columns=["asset_id"],
             # No None survives to here in practice (asset_id/origin/claim/
             # timestamps are never None on this branch, and releasability_from

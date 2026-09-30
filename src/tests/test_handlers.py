@@ -270,6 +270,34 @@ def test_telemetry_latest_status_only_record_carries_origin_and_asset_id():
     assert write.row["operational_status"] == "deactivated"
 
 
+def test_telemetry_latest_status_only_removed_uses_update_not_upsert():
+    """A Remove Entity claim must never INSERT a brand-new row for an
+    asset_id this projector has no prior record of — the upstream kind gate
+    is stateless and admits every removal by PDU type regardless of prior
+    knowledge of the asset, so resolution against existing asset ids must
+    happen here, at write time, via a mode that can only touch a row that
+    already exists."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_REMOVED"},
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.mode == "update"
+
+
+def test_telemetry_latest_status_only_non_removal_still_uses_upsert():
+    """Every other status-only claim (deactivated, destroyed) is unchanged —
+    only OPERATIONAL_STATUS_REMOVED switches to mode='update'."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_DEACTIVATED"},
+        "provenance": {"edge_id": "edge-02", "region_id": "region-02"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.mode == "upsert"
+
+
 def test_telemetry_latest_status_only_record_omits_absent_releasability():
     """releasability_from already omits unlabelled keys rather than nulling
     them (ADR-0029 §3); the status-only path must not reintroduce a None."""
