@@ -91,7 +91,7 @@ def test_staleness_sweep_sql_is_update_not_delete():
     assert '"reporting_status" = $1' in sql
     assert '"reporting_status_at" = $2' in sql
     # only rows not already flagged are touched, and only by staleness
-    assert '"last_sample_at" < $2' in sql
+    assert '"last_sample_at" < $2::timestamptz' in sql
     assert '"reporting_status" != $1' in sql
 
 

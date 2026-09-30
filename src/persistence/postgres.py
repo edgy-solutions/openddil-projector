@@ -189,11 +189,16 @@ class PostgresPool:
         this reader's own stale_after_s. Only rows not already flagged are
         touched, so a repeated sweep over an already-stale row is a no-op
         rather than repeatedly bumping reporting_at_column.
+
+        `$2::timestamptz` is load-bearing: uncast, Postgres infers $2 from
+        `$2 - interval` as an interval, and the comparison becomes
+        timestamptz < interval, which fails on every pass. Only a real server
+        can see that (test_sweep_real_postgres.py).
         """
         return (
             f'UPDATE "{table}" SET '
             f'"{reporting_column}" = $1, "{reporting_at_column}" = $2 '
-            f'WHERE "{sample_column}" < $2 - ($3 || \' seconds\')::interval '
+            f'WHERE "{sample_column}" < $2::timestamptz - ($3 || \' seconds\')::interval '
             f'AND "{reporting_column}" != $1'
         )
 

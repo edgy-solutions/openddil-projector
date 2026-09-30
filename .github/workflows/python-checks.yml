@@ -56,6 +56,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A real Postgres for test_sweep_real_postgres.py. The reporting sweep's
+    # SQL passed every string-shape test while failing on every server; only
+    # a planner sees that. Under CI the test FAILS if this DSN is missing,
+    # rather than skipping to green.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: projector
+          POSTGRES_PASSWORD: projector
+          POSTGRES_DB: projector_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U projector"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PROJECTOR_TEST_PG_DSN: postgresql://projector:projector@localhost:5432/projector_test
     steps:
       # Checked out under a directory named for the repo, with contracts as a
       # SIBLING, because src/tests/conftest.py resolves the gen path as
