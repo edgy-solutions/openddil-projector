@@ -27,7 +27,9 @@ from __future__ import annotations
 from typing import Any
 
 from edge_assignment import extract_wgs84
-from lifecycle_status import is_dis_destroyed_signal
+from lifecycle_status import (OPERATIONAL_STATUS_DESTROYED,
+                               is_dis_destroyed_signal,
+                               operational_status_from_op_state)
 from persistence import Write
 
 from .base import (now_utc, parse_timestamp, releasability_from,
@@ -73,6 +75,54 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # (see reporting_sweep.py).
     now = now_utc()
 
+    # ADR-0044 lifecycle slice "A": prefer the operational_status field
+    # itself over the slice-1 fallback. `field_claim` remembers WHICH path
+    # produced the claim, because the two paths write different shapes below
+    # (see the status-only branch's comment) — a fallback-derived "destroyed"
+    # still comes off a DIS Entity State PDU that also carries this entity's
+    # own kinematics, so it stays on the ordinary full-row path exactly as
+    # slice 1 shipped it; only a genuine field claim can trigger status-only.
+    op_status_claim = operational_status_from_op_state(op_state)
+    field_claim = op_status_claim is not None
+    if not field_claim and is_dis_destroyed_signal(op_state, provenance):
+        op_status_claim = OPERATIONAL_STATUS_DESTROYED
+
+    # ADR-0044 lifecycle slice "A", §3b: a STATUS-ONLY record. No kinematics
+    # AND a genuine operational_status claim is the shape a signal that is
+    # NOT the entity reporting its own position takes — the case this slice
+    # is built for is a simulation manager's Remove Entity PDU (ADR
+    # §Alignment: "not decoded at all" today, but the column and this branch
+    # exist ahead of that decoder so the write path is ready when it lands).
+    # A Remove Entity does not come from the entity, so this branch must NOT
+    # write reporting_status/_at (that column answers "did the ASSET report",
+    # and this message isn't the asset reporting), last_sample_at,
+    # kinematics, sustainment, provenance, the identity columns, or the
+    # operational_state axes — doing so would blank a living row's last
+    # known position and labels on the word of an authority (ADR §4:
+    # "operational status is owned" by whoever received the actual signal,
+    # not invented by whoever relays it) that never claimed to know them.
+    if not kinematics and field_claim:
+        status_only_row = {
+            "asset_id": asset_id,
+            **origin,
+            **releasability_from(provenance),
+            "operational_status": op_status_claim,
+            "operational_status_at": now,
+            "updated_at": now,
+        }
+        return Write(
+            table=TABLE,
+            mode="upsert",
+            key_columns=["asset_id"],
+            # No None survives to here in practice (asset_id/origin/claim/
+            # timestamps are never None on this branch, and releasability_from
+            # already omits its own keys rather than nulling them) — filtered
+            # anyway so a future field added to this dict fails safe instead
+            # of silently nulling a column this record has no business
+            # touching.
+            row={k: v for k, v in status_only_row.items() if v is not None},
+        )
+
     row = {
         "asset_id": asset_id,
         **origin,
@@ -108,15 +158,18 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "updated_at": now,
     }
 
-    # ADR-0044 lifecycle slice 1: operational_status is the one column that
-    # must NOT be written on every message — only on an actual signal about
-    # the asset. Omitting the keys (not writing "operational") when there is
-    # no such signal is what makes silence, or an ordinary non-destroyed
-    # update, leave a prior "destroyed" value alone; Postgres's UPSERT only
-    # touches columns present in this dict (see PostgresPool.build_sql), so
-    # omission is the mechanism, not an afterthought.
-    if is_dis_destroyed_signal(op_state, provenance):
-        row["operational_status"] = "destroyed"
+    # ADR-0044 lifecycle slice 1 (slice "A": now sourced from op_status_claim,
+    # computed above from the field first and the DIS fallback second, rather
+    # than re-testing is_dis_destroyed_signal here). operational_status is
+    # the one column that must NOT be written on every message — only on an
+    # actual signal about the asset. Omitting the keys (not writing
+    # "operational") when there is no such signal is what makes silence, or
+    # an ordinary non-destroyed update, leave a prior terminal value alone;
+    # Postgres's UPSERT only touches columns present in this dict (see
+    # PostgresPool.build_sql), so omission is the mechanism, not an
+    # afterthought.
+    if op_status_claim is not None:
+        row["operational_status"] = op_status_claim
         row["operational_status_at"] = now
 
     return Write(

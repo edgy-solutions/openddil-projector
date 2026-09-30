@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from lifecycle_status import compute_reporting_status, is_dis_destroyed_signal
+from lifecycle_status import (TERMINAL_OPERATIONAL_STATUSES,
+                               compute_reporting_status,
+                               is_dis_destroyed_signal,
+                               operational_status_from_op_state)
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 STALE_AFTER_S = 30
@@ -99,3 +102,54 @@ def test_case2_two_readers_disagree_on_the_same_asset_at_the_same_instant():
     assert edge_view == "reporting"
     assert hq_view == "not_reporting"
     assert edge_view != hq_view
+
+
+# -- operational_status_from_op_state (ADR-0044 lifecycle slice "A") ---------
+
+def test_operational_status_maps_destroyed():
+    assert operational_status_from_op_state(
+        {"operational_status": "OPERATIONAL_STATUS_DESTROYED"}) == "destroyed"
+
+
+def test_operational_status_maps_deactivated():
+    assert operational_status_from_op_state(
+        {"operational_status": "OPERATIONAL_STATUS_DEACTIVATED"}) == "deactivated"
+
+
+def test_operational_status_maps_removed():
+    assert operational_status_from_op_state(
+        {"operational_status": "OPERATIONAL_STATUS_REMOVED"}) == "removed"
+
+
+def test_operational_status_unspecified_is_no_claim():
+    assert operational_status_from_op_state(
+        {"operational_status": "OPERATIONAL_STATUS_UNSPECIFIED"}) is None
+
+
+def test_operational_status_operational_is_no_claim():
+    """OPERATIONAL is a claim the producer makes, but not one this column
+    persists — it is the DB default already (see lifecycle_status.py's
+    module-level dict comment). Writing "operational" here would be
+    indistinguishable from a handler moving the column on an ordinary
+    update, which ADR §1 forbids in the other direction (destroyed ->
+    operational via silence/an unrelated message)."""
+    assert operational_status_from_op_state(
+        {"operational_status": "OPERATIONAL_STATUS_OPERATIONAL"}) is None
+
+
+def test_operational_status_absent_field_is_no_claim():
+    """Producer not yet emitting the field at all — the pre-field-adoption
+    case `is_dis_destroyed_signal`'s fallback exists for."""
+    assert operational_status_from_op_state({}) is None
+
+
+def test_operational_status_unrecognized_string_is_no_claim():
+    assert operational_status_from_op_state(
+        {"operational_status": "SOME_FUTURE_ENUM_VALUE"}) is None
+
+
+def test_terminal_operational_statuses_are_exactly_the_three_endpoints():
+    """Pinned so a future edit can't silently add "operational" (never
+    prunable at any age, ADR §1 rule 3) or drop one of the three without a
+    test noticing — this tuple is a direct input to the prune predicate."""
+    assert TERMINAL_OPERATIONAL_STATUSES == ("destroyed", "deactivated", "removed")

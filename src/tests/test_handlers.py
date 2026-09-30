@@ -217,6 +217,130 @@ def test_telemetry_latest_extracts_operational_state():
     assert "actively_receiving" not in write.jsonb_columns
 
 
+# -- ADR-0044 lifecycle slice "A": status-only records -----------------------
+
+_STATUS_ONLY_ALLOWED_KEYS = {
+    "asset_id", "edge_id", "region_id",
+    "operational_status", "operational_status_at", "updated_at",
+    "originator_nation", "releasable_to",
+}
+
+
+def test_telemetry_latest_status_only_record_has_exactly_the_allowed_keys():
+    """No kinematics + a genuine operational_status field claim (the shape a
+    Remove Entity / appearance-only signal from a simulation manager takes,
+    per ADR-0044 §Alignment) must NOT write reporting_status/_at,
+    last_sample_at, kinematics, sustainment, provenance, identity columns,
+    or the operational_state axes — a Remove Entity isn't the entity
+    reporting, so this branch must not blank a living row's last known
+    position or labels."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099", "callsign": "SHOULD-NOT-APPEAR"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_REMOVED"},
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write is not None
+    assert set(write.row.keys()) <= _STATUS_ONLY_ALLOWED_KEYS
+    assert "reporting_status" not in write.row
+    assert "reporting_status_at" not in write.row
+    assert "last_sample_at" not in write.row
+    assert "kinematics" not in write.row
+    assert "sustainment" not in write.row
+    assert "provenance" not in write.row
+    assert "callsign" not in write.row
+    assert "platform_variant" not in write.row
+    assert "force_id" not in write.row
+    assert "power_state" not in write.row
+    assert write.row["operational_status"] == "removed"
+    # No None-valued key survives in this path.
+    assert all(v is not None for v in write.row.values())
+
+
+def test_telemetry_latest_status_only_record_carries_origin_and_asset_id():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_DEACTIVATED"},
+        "provenance": {"edge_id": "edge-02", "region_id": "region-02"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.row["asset_id"] == "dis:1:1:1099"
+    assert write.row["edge_id"] == "edge-02"
+    assert write.row["region_id"] == "region-02"
+    assert write.row["operational_status"] == "deactivated"
+
+
+def test_telemetry_latest_status_only_record_omits_absent_releasability():
+    """releasability_from already omits unlabelled keys rather than nulling
+    them (ADR-0029 §3); the status-only path must not reintroduce a None."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_REMOVED"},
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert "originator_nation" not in write.row
+    assert "releasable_to" not in write.row
+    # And the row is still status-only shaped, not the full-row shape the
+    # pre-slice-"A" fallback path would have produced for this fixture.
+    assert "reporting_status" not in write.row
+    assert "kinematics" not in write.row
+
+
+def test_telemetry_latest_status_only_record_includes_releasability_when_present():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_REMOVED"},
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01",
+                       "originator_nation": "ATL", "releasable_to": ["BDR"]},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
+    assert "reporting_status" not in write.row
+    assert "kinematics" not in write.row
+
+
+def test_telemetry_latest_field_claim_with_kinematics_stays_on_ordinary_path():
+    """A genuine operational_status claim ALONGSIDE kinematics (an ordinary
+    entity report that also happens to assert its own destruction) is not
+    the status-only shape — the entity IS reporting its position, so the
+    ordinary full-row path applies and reporting_status/kinematics/etc. are
+    written exactly as any other message would."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1005"},
+        "kinematics": {"position": {"ecef": {"x": {"value": 1.0, "unit": "m"}}}},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_DESTROYED"},
+        "provenance": {"producer_id": "dis-ingestor-binary",
+                       "source_protocol": "DIS/IEEE-1278.1-binary",
+                       "sample_time": "2026-05-14T03:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1005", decoded)
+    assert write.row["operational_status"] == "destroyed"
+    assert write.row["reporting_status"] == "reporting"
+    assert "kinematics" in write.row
+    assert write.jsonb_columns == {"kinematics", "sustainment", "provenance"}
+
+
+def test_telemetry_latest_no_kinematics_no_field_claim_uses_dis_fallback_not_status_only():
+    """No kinematics AND no operational_status field claim, but the slice-1
+    DIS fallback fires (health_state=FAILED off a DIS wire): §3b's trigger is
+    "(2) returns a claim", i.e. the FIELD, not the fallback boolean — so this
+    stays on the full-row path (matching slice 1's pre-existing behavior
+    exactly, unchanged by this slice)."""
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1005"},
+        "operational_state": {"health_state": "HEALTH_STATE_FAILED"},
+        "provenance": {"producer_id": "dis-ingestor-binary",
+                       "source_protocol": "DIS/IEEE-1278.1-binary",
+                       "sample_time": "2026-05-14T03:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1005", decoded)
+    assert write.row["operational_status"] == "destroyed"
+    assert write.row["reporting_status"] == "reporting"
+    assert "kinematics" in write.row  # present (None) — full-row shape
+
+
 # -- tactical_events ----------------------------------------------------------
 
 def test_tactical_events_maps_cloudevent_and_extracts_severity():

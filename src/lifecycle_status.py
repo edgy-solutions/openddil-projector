@@ -38,9 +38,56 @@ DIS_SOURCE_PROTOCOL_PREFIX = "DIS/IEEE-1278.1"
 
 OPERATIONAL_STATUS_OPERATIONAL = "operational"
 OPERATIONAL_STATUS_DESTROYED = "destroyed"
+OPERATIONAL_STATUS_DEACTIVATED = "deactivated"
+OPERATIONAL_STATUS_REMOVED = "removed"
 
 REPORTING_STATUS_REPORTING = "reporting"
 REPORTING_STATUS_NOT_REPORTING = "not_reporting"
+
+# ADR-0044 §1 rule 3: "only an asset in a terminal status is eligible for
+# retention". These three, and only these three, are the values the prune
+# predicate (persistence.postgres.build_prune_sql) may treat as prunable.
+# "operational" is deliberately absent — a still-operational asset is never
+# prunable regardless of age, and REPORTING_STATUS values never belong in
+# this tuple at all (reporting_status must never be a prune input; ADR §2,
+# "different mechanisms answering different questions").
+TERMINAL_OPERATIONAL_STATUSES = (
+    OPERATIONAL_STATUS_DESTROYED,
+    OPERATIONAL_STATUS_DEACTIVATED,
+    OPERATIONAL_STATUS_REMOVED,
+)
+
+# proto enum-name string (OperationalStatus, telemetry.proto) -> column
+# value. UNSPECIFIED and OPERATIONAL both map to None: per the proto's own
+# comment, both are claims a producer makes, but neither is a claim this
+# column persists — OPERATIONAL is the DB default already (nothing to
+# write), and UNSPECIFIED is "no claim" by definition. Any string this dict
+# doesn't recognize (absent field, a future enum value we don't know about
+# yet) also falls through to None via .get()'s default, on the same
+# "no claim, omit" logic is_dis_destroyed_signal already applies below.
+_OPERATIONAL_STATUS_ENUM_TO_COLUMN = {
+    "OPERATIONAL_STATUS_DESTROYED": OPERATIONAL_STATUS_DESTROYED,
+    "OPERATIONAL_STATUS_DEACTIVATED": OPERATIONAL_STATUS_DEACTIVATED,
+    "OPERATIONAL_STATUS_REMOVED": OPERATIONAL_STATUS_REMOVED,
+}
+
+
+def operational_status_from_op_state(op_state: dict) -> str | None:
+    """The operational_status column value this message's `operational_state.
+    operational_status` field (telemetry.proto's `OperationalStatus` enum,
+    ADR-0044 lifecycle slice "A") asserts — or None when it asserts nothing.
+
+    None covers every non-claim case identically, on purpose: the field is
+    absent (producer not yet emitting it — see `is_dis_destroyed_signal` for
+    the pre-field-adoption fallback signal), UNSPECIFIED (explicitly no
+    claim), OPERATIONAL (a claim, but not one this column persists — see the
+    module-level dict's comment), or an enum-name string this dict does not
+    recognize. A caller must treat None as "omit the key", never as
+    "operational" — writing "operational" here would move the column on a
+    non-claim, exactly what ADR §1's "withdrawal cannot be inferred from
+    silence" forbids in the other direction.
+    """
+    return _OPERATIONAL_STATUS_ENUM_TO_COLUMN.get((op_state or {}).get("operational_status"))
 
 
 def is_dis_destroyed_signal(op_state: dict, provenance: dict) -> bool:

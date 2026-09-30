@@ -19,7 +19,17 @@ from typing import Any
 
 import asyncpg
 
+from lifecycle_status import TERMINAL_OPERATIONAL_STATUSES
+
 log = logging.getLogger("projector.postgres")
+
+# ADR-0044 §1 rule 3 / §4: the table other per-asset tables' prune
+# predicates join against for "is this asset_id's operational_status
+# terminal?". Not configurable — every per-asset table shares one lifecycle
+# system of record, and a second one to point at would just be a second
+# answer to the question ADR-0044's Alignment section says is still open
+# about *who* may assert it, not about *where* the assertion lives once made.
+LIFECYCLE_TABLE = "telemetry_latest_state"
 
 
 @dataclass
@@ -226,15 +236,61 @@ class PostgresPool:
         except (ValueError, IndexError):  # pragma: no cover
             return 0
 
+    @staticmethod
+    def build_prune_sql(table: str, time_column: str, *,
+                         asset_id_keyed: bool) -> str:
+        """Return the parameterised prune DELETE for `table`. Pure — unit
+        testable without a live Postgres, same as `build_sql`.
+
+        $1 = the TTL, in hours (bound as text and cast, same as before this
+        ADR — `prune_older_than` passes `str(hours)`).
+
+        ADR-0044 §1 rule 3: age alone is no longer a sufficient predicate for
+        any table that carries a per-asset operational_status, because "only
+        a terminal status is eligible for retention" — a quiet-but-still-
+        operational asset must never be pruned merely for being old
+        (rule 3's "withdrawal cannot be inferred from silence", extended from
+        reporting_status to age). `asset_id_keyed=False` is the escape hatch
+        for the tables this doesn't apply to (see NON_ASSET_ID_KEYED comment
+        at the call site in main.py) and reproduces the pre-ADR age-only SQL
+        byte-for-byte, so nothing changes for them.
+
+        `table == LIFECYCLE_TABLE` (telemetry_latest_state itself) checks its
+        OWN operational_status column. Every other asset_id-keyed table has
+        no such column of its own — it was never part of what this ADR two-
+        columned — so it EXISTS-joins telemetry_latest_state on asset_id
+        instead. Both branches read reporting_status nowhere: reporting_status
+        must never be a prune input (ADR §2 — it answers a different question
+        than "is this asset gone").
+        """
+        age_predicate = (
+            f'"{time_column}" < now() - ($1 || \' hours\')::interval'
+        )
+        if not asset_id_keyed:
+            return f'DELETE FROM "{table}" WHERE {age_predicate}'
+
+        terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_OPERATIONAL_STATUSES)
+        if table == LIFECYCLE_TABLE:
+            return (
+                f'DELETE FROM "{table}" WHERE {age_predicate} '
+                f'AND "operational_status" IN ({terminal_list})'
+            )
+        return (
+            f'DELETE FROM "{table}" AS t WHERE t.{age_predicate} '
+            f'AND EXISTS (SELECT 1 FROM "{LIFECYCLE_TABLE}" AS lc '
+            f'WHERE lc."asset_id" = t."asset_id" '
+            f'AND lc."operational_status" IN ({terminal_list}))'
+        )
+
     async def prune_older_than(self, table: str, time_column: str,
-                               hours: int) -> int:
-        """Delete rows older than `hours`. Returns rows deleted."""
+                               hours: float, *,
+                               asset_id_keyed: bool = False) -> int:
+        """Delete rows eligible for retention per `build_prune_sql`. Returns
+        rows deleted."""
         if self._pool is None:
             raise RuntimeError("PostgresPool.prune_older_than before connect()")
-        sql = (
-            f'DELETE FROM "{table}" '
-            f"WHERE \"{time_column}\" < now() - ($1 || ' hours')::interval"
-        )
+        sql = self.build_prune_sql(table, time_column,
+                                    asset_id_keyed=asset_id_keyed)
         async with self._pool.acquire() as conn:
             result = await conn.execute(sql, str(hours))
         # asyncpg returns e.g. "DELETE 12"

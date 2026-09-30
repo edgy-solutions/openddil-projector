@@ -260,50 +260,105 @@ class ConsumerWorker:
             log.debug("lag probe failed for %s: %s", self.mapping.topic, exc)
 
 
-async def prune_loop(pool: PostgresPool, mappings: list[Mapping]) -> None:
-    """Hourly retention pruning. Two flavors of cleanup share the loop:
+# ADR-0044 §1 rule 3: upsert tables in the asset_ttl_hours set whose row
+# does NOT carry its own asset_id column keyed 1:1 with an asset (checked
+# against each handler's own `Write.key_columns` in src/handlers/) can't be
+# joined against telemetry_latest_state's per-asset operational_status, so
+# they are left on the pre-ADR age-only predicate rather than guessed at.
+# inventory_items is keyed by "id" (a deterministic `<asset_id>:<layer_name>`
+# composite — see asset_element_inventory.py); every other table in today's
+# asset_ttl_hours set (asset_cm_state, asset_logistics_status,
+# telemetry_latest_state, asset_telemetry_windows, asset_capability_state,
+# asset_element_telemetry) is keyed by plain `key_columns=["asset_id"]`.
+NON_ASSET_ID_KEYED_UPSERT_TABLES = frozenset({"inventory_items"})
 
-    * APPEND mode (e.g. tactical_events) -- rolling-window event log;
-      drops rows where `time` is older than retention_hours.
-    * UPSERT mode with asset_ttl_hours set (e.g. telemetry_latest_state,
-      asset_cm_state, ...) -- bounds postgres growth across long-
-      running demos where every asset_id ever seen would otherwise
-      accumulate. Drops rows where `updated_at` is older than
-      asset_ttl_hours. The 5-tier liveness model on the frontend
-      already hides assets at the operator level; this TTL is the
-      separate long-tail cap so postgres doesn't grow without bound.
-      Different window than the frontend's LOST threshold by design
-      -- postgres is the long memory, the SPA filters for what
-      operators want to see.
+# Default hourly, as before this env var existed. Overridable so a compose
+# run can exercise a full prune pass on a human timescale (paired with
+# PROJECTOR_ASSET_TTL_HOURS set to a fraction of an hour) instead of waiting
+# out a real 3600s sleep to see ADR-0044's terminal-status gate fire.
+PRUNE_INTERVAL_S = float(os.getenv("PROJECTOR_PRUNE_INTERVAL_S", "3600"))
 
-    Rollup tables (region_*) are aggregates whose updated_at is bumped
-    whenever the underlying assets churn; they shouldn't be aged out by
-    a static TTL. Leave asset_ttl_hours unset in their mappings.
+
+def build_prune_targets(
+    mappings: list[Mapping],
+) -> list[tuple[str, str, float, bool]]:
+    """(table, time_column, hours, asset_id_keyed) tuples, in the order
+    `prune_loop` must run them in one pass. Pure — no asyncio, no pool —
+    split out of `prune_loop` specifically so the ADR-0044 dependents-
+    before-`telemetry_latest_state` ordering is unit-testable the same way
+    `PostgresPool.build_sql`/`build_prune_sql` are: fabricated `Mapping`
+    objects in, an ordered list out, no DB.
     """
     append_tables = [
-        (m.table, "time", m.retention_hours)
+        (m.table, "time", m.retention_hours, False)
         for m in mappings
         if m.mode == "append" and m.retention_hours
     ]
     upsert_tables = [
-        (m.table, "updated_at", m.asset_ttl_hours)
+        (m.table, "updated_at", m.asset_ttl_hours,
+         m.table not in NON_ASSET_ID_KEYED_UPSERT_TABLES)
         for m in mappings
         if m.mode == "upsert" and m.asset_ttl_hours
     ]
-    all_targets = append_tables + upsert_tables
+    # Dependents-before-lifecycle-table within the upsert group (see
+    # prune_loop's docstring). Stable sort: only telemetry_latest_state's
+    # relative position moves, to last.
+    from persistence.postgres import LIFECYCLE_TABLE
+    upsert_tables.sort(key=lambda t: t[0] == LIFECYCLE_TABLE)
+    return append_tables + upsert_tables
+
+
+async def prune_loop(pool: PostgresPool, mappings: list[Mapping]) -> None:
+    """Retention pruning, on PROJECTOR_PRUNE_INTERVAL_S (default hourly).
+    Two flavors of cleanup share the loop:
+
+    * APPEND mode (e.g. tactical_events) -- rolling-window event log;
+      drops rows where `time` is older than retention_hours. Unaffected
+      by ADR-0044: these are event logs, not asset lifecycle state.
+    * UPSERT mode with asset_ttl_hours set (e.g. telemetry_latest_state,
+      asset_cm_state, ...) -- bounds postgres growth across long-
+      running demos where every asset_id ever seen would otherwise
+      accumulate. Drops rows where `updated_at` is older than
+      asset_ttl_hours AND (ADR-0044 §1 rule 3) that asset_id's
+      operational_status in telemetry_latest_state is terminal -- see
+      `PostgresPool.build_prune_sql`. An asset that is old but still
+      just "operational" (or "operational" and merely not_reporting;
+      reporting_status is never a prune input) is never eligible, at any
+      age -- that is the whole content of the amendment this slice
+      implements. The 5-tier liveness model on the frontend already
+      hides assets at the operator level; this TTL is the separate
+      long-tail cap so postgres doesn't grow without bound. Different
+      window than the frontend's LOST threshold by design -- postgres is
+      the long memory, the SPA filters for what operators want to see.
+
+    Rollup tables (region_*) are aggregates whose updated_at is bumped
+    whenever the underlying assets churn; they shouldn't be aged out by
+    a static TTL. Leave asset_ttl_hours unset in their mappings.
+
+    Ordering within a pass: telemetry_latest_state is pruned LAST among the
+    asset_id-keyed upsert tables. It is the row every other table's terminal-
+    status predicate joins against (`build_prune_sql`'s EXISTS check); pruning
+    it first would delete the evidence a dependent needs to qualify for
+    pruning IN THE SAME PASS, silently pushing that dependent's prune to the
+    next interval instead of this one.
+    """
+    all_targets = build_prune_targets(mappings)
     if not all_targets:
         return
+    append_count = sum(1 for _, key_col, *_ in all_targets if key_col == "time")
     log.info("prune_loop: %d append target(s), %d upsert target(s)",
-             len(append_tables), len(upsert_tables))
+             append_count, len(all_targets) - append_count)
     while True:
-        await asyncio.sleep(3600)
-        for table, key_col, hours in all_targets:
+        await asyncio.sleep(PRUNE_INTERVAL_S)
+        for table, key_col, hours, asset_id_keyed in all_targets:
             try:
-                deleted = await pool.prune_older_than(table, key_col, hours)
+                deleted = await pool.prune_older_than(
+                    table, key_col, hours, asset_id_keyed=asset_id_keyed)
                 if deleted:
                     ROWS_PRUNED.labels(table=table).inc(deleted)
-                    log.info("pruned %d rows from %s (> %dh old by %s)",
-                             deleted, table, hours, key_col)
+                    log.info("pruned %d rows from %s (> %gh old by %s%s)",
+                             deleted, table, hours, key_col,
+                             ", terminal operational_status" if asset_id_keyed else "")
             except Exception as exc:  # noqa: BLE001
                 log.warning("prune failed for %s: %s", table, exc)
 

@@ -33,7 +33,10 @@ class Mapping:
     # asset_id ever seen across sim sessions. None = no TTL (the
     # rollup tables are aggregates and shouldn't be aged out by
     # asset turnover). Same hourly cleanup loop handles both modes.
-    asset_ttl_hours: int | None = None
+    # float, not int: a compose run exercising ADR-0044's terminal-status
+    # prune gate needs a TTL of minutes, not hours (e.g. 0.01h ~= 36s), and
+    # 0 must keep meaning "disabled" for both types.
+    asset_ttl_hours: float | None = None
 
 
 @dataclass
@@ -74,11 +77,14 @@ def load_config(path: Path | None = None) -> Config:
     # TTL for ALL upsert mappings (escape hatch). Empty string / unset
     # = honor whatever the yaml specifies per mapping.
     env_ttl_raw = os.getenv("PROJECTOR_ASSET_TTL_HOURS", "").strip()
-    env_ttl_override: int | None
+    env_ttl_override: float | None
     if env_ttl_raw == "":
         env_ttl_override = None
     else:
-        env_ttl_override = int(env_ttl_raw)  # may be 0 (= disable)
+        # float, not int (see Mapping.asset_ttl_hours) — a compose run can
+        # set e.g. PROJECTOR_ASSET_TTL_HOURS=0.01 to exercise the prune loop
+        # in seconds instead of waiting out a real TTL_HOURS=24.
+        env_ttl_override = float(env_ttl_raw)  # may be 0 (= disable)
 
     for entry in raw.get("mappings", []):
         mode = entry.get("mode", "upsert")
