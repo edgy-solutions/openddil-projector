@@ -40,6 +40,10 @@ REMOVAL_UNKNOWN_ASSET_DROPPED = Counter(
     "Remove Entity claims for an asset_id with no row, dropped (no row created)",
     ["table"],
 )
+# Present at 0 from startup. A labelled counter has no series until a label
+# is used, and then "nothing dropped yet" reads the same as "this build
+# cannot drop".
+REMOVAL_UNKNOWN_ASSET_DROPPED.labels(table="telemetry_latest_state")
 
 
 def start_metrics_server() -> int:
