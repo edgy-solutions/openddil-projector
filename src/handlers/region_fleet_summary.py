@@ -32,6 +32,12 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "degraded":        int(decoded.get("degraded") or 0),
         "critical":        int(decoded.get("critical") or 0),
         "non_operational": int(decoded.get("non_operational") or 0),
+        # ADR-0044 §3: terminal operational-status partitions, adopted
+        # verbatim from the wire message (faust-regional's aggregator has
+        # already done the counting) — never re-derived here.
+        "destroyed":       int(decoded.get("destroyed") or 0),
+        "deactivated":     int(decoded.get("deactivated") or 0),
+        "removed":         int(decoded.get("removed") or 0),
         "asset_count":     int(decoded.get("asset_count") or 0),
         "observed_at":     parse_timestamp(decoded.get("observed_at")),
         "updated_at":      now_utc(),
