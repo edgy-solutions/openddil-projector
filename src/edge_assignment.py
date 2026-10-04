@@ -9,10 +9,14 @@ Built-in strategies:
 
   nearest_fob     — Haversine to a configured list of FOB coordinates.
                     Best for assets that carry a position.
-  asset_id_prefix — longest-prefix match against asset_id (good for
-                    positionless assets like strike-only launchers).
   static          — explicit asset_id -> (edge, region) map.
   chain           — try a list of strategies in order; first non-None wins.
+
+`asset_id_prefix` was removed (ADR-0047: asset_id is opaque — interior code
+may compare/hash/key/store/display it, but never split, regex, slice, or
+prefix/suffix-check it). A config naming it fails loudly at startup; use
+`static` with exact asset ids, or have the boundary mapper set provenance
+edge_id/region_id.
 
 External strategies can be plugged in via the `register_strategy` decorator
 without editing this file — `@register_strategy("my_thing")` on a
@@ -105,26 +109,6 @@ def nearest_fob_strategy(fobs: list[Fob]) -> Strategy:
     return s
 
 
-def asset_id_prefix_strategy(
-    prefix_map: Mapping[str, tuple[str, str]],
-) -> Strategy:
-    """Pick (edge, region) for the longest matching asset_id prefix."""
-    # Sort once at build time; longest prefix wins, so e.g. "AAA_BBB_"
-    # beats "AAA_".
-    sorted_prefixes = sorted(prefix_map.items(), key=lambda x: -len(x[0]))
-
-    def s(ctx: AssetContext) -> Optional[EdgeAssignment]:
-        for prefix, (edge_id, region_id) in sorted_prefixes:
-            if ctx.asset_id.startswith(prefix):
-                return EdgeAssignment(
-                    edge_id=edge_id,
-                    region_id=region_id,
-                    derivation_basis={"method": "asset_id_prefix", "prefix": prefix},
-                )
-        return None
-    return s
-
-
 def static_strategy(
     static_map: Mapping[str, tuple[str, str]],
 ) -> Strategy:
@@ -177,9 +161,11 @@ def _build_nearest_fob(cfg: dict) -> Strategy:
 
 @register_strategy("asset_id_prefix")
 def _build_asset_id_prefix(cfg: dict) -> Strategy:
-    raw = cfg.get("asset_id_prefix_map") or {}
-    mapping = {p: (v["edge_id"], v["region_id"]) for p, v in raw.items()}
-    return asset_id_prefix_strategy(mapping)
+    raise ValueError(
+        "edge-assignment strategy 'asset_id_prefix' was removed (ADR-0047: "
+        "asset_id is opaque); use 'static' with exact asset ids, or have the "
+        "boundary mapper set provenance edge_id/region_id"
+    )
 
 
 @register_strategy("static")

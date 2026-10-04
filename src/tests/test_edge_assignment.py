@@ -12,7 +12,6 @@ from edge_assignment import (
     AssetContext,
     EdgeAssignment,
     Fob,
-    asset_id_prefix_strategy,
     build_strategy_from_config,
     chained_strategy,
     configure_from_config,
@@ -77,23 +76,6 @@ def test_nearest_fob_returns_none_with_empty_fobs():
     assert s(AssetContext("UNIT-X", lat=10.0, lon=20.0)) is None
 
 
-# ---- asset_id_prefix_strategy --------------------------------------------
-
-def test_prefix_longest_match_wins():
-    s = asset_id_prefix_strategy({
-        "AAA_": ("edge-1", "region-1"),
-        "AAA_BBB_": ("edge-2", "region-2"),
-    })
-    a = s(AssetContext("AAA_BBB_widget"))
-    assert a is not None and a.edge_id == "edge-2"
-    assert a.derivation_basis["prefix"] == "AAA_BBB_"
-
-
-def test_prefix_no_match_returns_none():
-    s = asset_id_prefix_strategy({"FOO_": ("edge-99", "region-99")})
-    assert s(AssetContext("BAR_thing")) is None
-
-
 # ---- static_strategy ------------------------------------------------------
 
 def test_static_hit_and_miss():
@@ -107,12 +89,12 @@ def test_static_hit_and_miss():
 
 def test_chain_first_non_none_wins():
     nearest = nearest_fob_strategy(TEST_FOBS)
-    prefix = asset_id_prefix_strategy({"DEMO_": ("edge-A", "region-N")})
-    chain = chained_strategy(nearest, prefix)
-    # positionless asset that matches the prefix
+    exact = static_strategy({"DEMO_thing": ("edge-A", "region-N")})
+    chain = chained_strategy(nearest, exact)
+    # positionless asset that matches the static map exactly
     a = chain(AssetContext("DEMO_thing"))
-    assert a is not None and a.derivation_basis["method"] == "asset_id_prefix"
-    # asset with a position — nearest_fob wins, prefix never runs
+    assert a is not None and a.derivation_basis["method"] == "static_map"
+    # asset with a position — nearest_fob wins, static never runs
     a = chain(AssetContext("DEMO_thing", lat=10.5, lon=20.5))
     assert a is not None and a.derivation_basis["method"] == "nearest_fob"
 
@@ -120,7 +102,7 @@ def test_chain_first_non_none_wins():
 def test_chain_all_none_returns_none():
     chain = chained_strategy(
         nearest_fob_strategy(TEST_FOBS),  # no position
-        asset_id_prefix_strategy({"X_": ("e", "r")}),  # no match
+        static_strategy({"X": ("e", "r")}),  # no match
     )
     assert chain(AssetContext("ZZZ")) is None
 
@@ -144,9 +126,9 @@ def test_build_chain_from_config():
         "strategy": "chain",
         "chain": [
             {"strategy": "nearest_fob", "fobs": []},  # always None
-            {"strategy": "asset_id_prefix",
-             "asset_id_prefix_map": {
-                 "DEMO_": {"edge_id": "edge-X", "region_id": "region-X"},
+            {"strategy": "static",
+             "static_map": {
+                 "DEMO_X": {"edge_id": "edge-X", "region_id": "region-X"},
              }},
         ],
     })
@@ -162,6 +144,13 @@ def test_build_unknown_strategy_raises():
 def test_build_missing_strategy_raises():
     with pytest.raises(ValueError, match="missing `strategy:`"):
         build_strategy_from_config({})
+
+
+def test_build_asset_id_prefix_strategy_removed_raises():
+    """A stale config naming the removed strategy fails loudly at startup
+    (ADR-0047: asset_id is opaque) instead of silently no-op'ing."""
+    with pytest.raises(ValueError, match="ADR-0047"):
+        build_strategy_from_config({"strategy": "asset_id_prefix"})
 
 
 # ---- register_strategy (external pluggability) ---------------------------
@@ -190,9 +179,9 @@ def test_resolve_for_uses_strategy_then_fallback():
                  {"edge_id": "edge-A", "region_id": "region-N",
                   "lat": 10.0, "lon": 20.0, "label": "A"},
              ]},
-            {"strategy": "asset_id_prefix",
-             "asset_id_prefix_map": {
-                 "DEMO_": {"edge_id": "edge-A", "region_id": "region-N"},
+            {"strategy": "static",
+             "static_map": {
+                 "DEMO_widget": {"edge_id": "edge-A", "region_id": "region-N"},
              }},
         ],
         "fallback": {"edge_id": "edge-unspecified",
@@ -204,10 +193,10 @@ def test_resolve_for_uses_strategy_then_fallback():
     assert a.edge_id == "edge-A"
     assert a.derivation_basis["method"] == "nearest_fob"
 
-    # No position, prefix matches.
+    # No position, static map matches.
     a = resolve_for("DEMO_widget", lat=None, lon=None, handler_label="test")
     assert a.edge_id == "edge-A"
-    assert a.derivation_basis["method"] == "asset_id_prefix"
+    assert a.derivation_basis["method"] == "static_map"
 
     # No position, no prefix match -> fallback.
     a = resolve_for("RANDOM_X", lat=None, lon=None, handler_label="test")
@@ -269,17 +258,17 @@ def test_env_override_replaces_main_edge_assignment(tmp_path, monkeypatch):
     )
     override = tmp_path / "edge-assignment.yaml"
     override.write_text(
-        "strategy: asset_id_prefix\n"
-        "asset_id_prefix_map:\n"
-        "  TEST_:\n"
+        "strategy: static\n"
+        "static_map:\n"
+        "  TEST_ASSET:\n"
         "    edge_id: edge-X\n"
         "    region_id: region-X\n"
     )
     monkeypatch.setenv("EDGE_ASSIGNMENT_CONFIG", str(override))
 
     cfg = load_config(main)
-    assert cfg.edge_assignment["strategy"] == "asset_id_prefix"
-    assert "TEST_" in cfg.edge_assignment["asset_id_prefix_map"]
+    assert cfg.edge_assignment["strategy"] == "static"
+    assert "TEST_ASSET" in cfg.edge_assignment["static_map"]
 
 
 def test_env_override_accepts_wrapper_shape(tmp_path, monkeypatch):
