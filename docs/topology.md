@@ -87,12 +87,26 @@ signature or the row schema.
 
 Beyond the topic consumers, the projector runs one background task —
 `src/edge_buffer_monitor.py` — that is **not** a topic→table projection.
-It probes the `bridge-group` consumer-group lag on `redpanda-edge` and the
-toxiproxy `hq-link` proxy state every ~2s, and writes the singleton
+It probes the `bridge-group` consumer-group lag AND committed offsets on
+`redpanda-edge` every ~2s, feeds the committed-offset advance into a
+`LinkReachability` state machine, and writes the singleton
 `edge_buffer_status` row. That row is the real, honestly-backed edge→HQ
 buffer depth and link state the UI's buffer/link widgets read (via
 `useEdgeBuffer`) — see
 [ADR-0021](../../openddil-contracts/decisions/ADR-0021-edge-hq-topology-is-load-bearing.md).
+
+`hq_link_severed` means "this tier's own uplink has completed no exchange
+with its parent for longer than `LINK_SEVER_AFTER_S`" — not a toxiproxy
+flag. The relay (bridge/uplink) commits its consumer-group offsets only
+after its parent acks the write, so an advance of those committed offsets
+is a completed exchange; that's measured from the relay's own commits
+rather than probed from this pod, because a NetworkPolicy cut of a parent
+typically admits the child's relay traffic but not an arbitrary probe
+from the child's projector, which would read SEVERED while data still
+flowed. `LINK_SEVER_AFTER_S` defaults to `2*(LINK_EXCHANGE_PERIOD_S +
+EDGE_BUFFER_PROBE_INTERVAL_S)`, both env-configurable; see
+`edge_buffer_monitor.py`'s module docstring and `LinkReachability` for the
+full derivation and hysteresis rules.
 
 ## Background tasks
 
