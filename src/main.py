@@ -37,6 +37,8 @@ from decoders import (
     decode_json,
 )
 from edge_buffer_monitor import edge_buffer_loop
+from effector_declared_load import DeclaredLoadConfigError, load_declared_load
+from effector_sweep import effector_sweep_loop
 from handlers import get_handler
 from metrics import (
     DECODE_ERRORS,
@@ -161,6 +163,21 @@ class ConsumerWorker:
                 _logged_decode_reasons.add(sig)
                 log.warning("decode error on %s: %s (logged once)", topic, exc)
             DECODE_ERRORS.labels(topic=topic, reason=reason).inc()
+            return
+
+        if self.mapping.mode == "custom":
+            # This handler owns its own Postgres I/O (see
+            # handlers/effector_launch.py). It is called directly with
+            # the pool instead of returning a `Write`, so none of the
+            # execute()/UPSERTS/REMOVAL_UNKNOWN_ASSET_DROPPED bookkeeping
+            # below applies — the handler does its own writes and its own
+            # metrics.
+            try:
+                await self._handler(key, decoded, self._pool)
+            except Exception as exc:  # noqa: BLE001 - handler bug must not crash consumer
+                log.error("custom handler %s raised on %s: %s",
+                          self.mapping.handler, topic, exc)
+                DECODE_ERRORS.labels(topic=topic, reason="handler_exception").inc()
             return
 
         try:
@@ -406,6 +423,18 @@ async def main() -> None:
     )
     await pool.connect()
 
+    # effector_declared_load has no streaming producer —
+    # it is operator-supplied fixture/overlay data, loaded wholesale at
+    # startup (see effector_declared_load.py). A malformed file is a fatal
+    # startup error, same discipline as a malformed projector_config.yaml —
+    # better to refuse to start than to run with a silently-wrong
+    # `effector_launcher_counts.remaining`.
+    try:
+        await load_declared_load(pool)
+    except DeclaredLoadConfigError as exc:
+        log.error("effector_declared_load config invalid: %s", exc)
+        sys.exit(1)
+
     workers = [ConsumerWorker(m, pool) for m in config.mappings]
 
     # SIGHUP: reload config. For Phase 4a this re-reads the file and logs the
@@ -447,6 +476,11 @@ async def main() -> None:
     # fact instead of a shared one (ADR §4); there is no "primary" sweeper
     # to gate, unlike edge_buffer_loop below.
     tasks.append(asyncio.create_task(reporting_sweep_loop(pool)))
+    # effector_launch timeout sweep. Same reasoning as
+    # reporting_sweep_loop above — runs unconditionally on every instance,
+    # on its own clock/interval; a no-op where this instance's Postgres has
+    # no in-flight effector_launch rows past the timeout.
+    tasks.append(asyncio.create_task(effector_sweep_loop(pool)))
     # Phase 4c.5: edge->HQ DDIL link/buffer monitor.
     # ADR-0023 Phase 6a: with 3 projector instances (one per edge cluster),
     # only one should run the buffer monitor — they all write to the same

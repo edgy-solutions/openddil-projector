@@ -3,6 +3,12 @@
 Each handler module exposes a `handle(key, decoded) -> Write | None`
 function. `get_handler` resolves the name from projector_config.yaml to the
 function. Adding a topic = a new module here + a config entry.
+
+ONE EXCEPTION: `effector_launch`'s `handle(key, decoded, pool)` is async and
+takes the pool directly (config.Mapping mode "custom") — see that module's
+docstring and main.py's `ConsumerWorker._persist` dispatch branch for
+mode == "custom". `get_handler` resolves it the same way as every other
+name; only the CALLING convention differs, at the one call site in main.py.
 """
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from . import (
     asset_element_telemetry,
     capability_state,
     cm_state,
+    effector_launch,
     logistics_status,
     region_fleet_summary,
     region_top_factors,
@@ -38,6 +45,8 @@ _REGISTRY: dict[str, Handler] = {
     # 2026-06-30: per-asset per-layer inventory aggregate (sim emits
     # alongside the per-element snapshot; drives maintainer Inventory card).
     "asset_element_inventory": asset_element_inventory.handle,
+    # mode "custom" — owns its own Postgres I/O; see module docstring above.
+    "effector_launch": effector_launch.handle,
 }
 
 

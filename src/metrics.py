@@ -45,6 +45,38 @@ REMOVAL_UNKNOWN_ASSET_DROPPED = Counter(
 # cannot drop".
 REMOVAL_UNKNOWN_ASSET_DROPPED.labels(table="telemetry_latest_state")
 
+# -- effector_launch (launch-record admission/termination) -------------------
+# Unprefixed -- a deliberate departure from this module's own `projector_*`
+# convention, which every other counter here follows, so these names stay
+# stable for dashboards built directly against them.
+EFFECTOR_REFUSED = Counter(
+    "effector_refused_total",
+    "effector_launch rows this handler declined to write",
+    ["reason"],
+)
+EFFECTOR_LATE_TERMINAL = Counter(
+    "effector_late_terminal_total",
+    "Detonations that resolved a row the timeout sweep had already marked unresolved",
+)
+EFFECTOR_UNRESOLVED = Counter(
+    "effector_unresolved_total",
+    "Rows the timeout sweep marked unresolved (no Detonation arrived in time)",
+)
+# A real Detonation for an event_urn two projector instances both admit the
+# matching Fire for (e.g. an edge projector and the HQ projector, each
+# writing the same shared store) lands twice. The second arrival to apply a
+# given result is a harmless replay, not a refusal -- counted separately so
+# it carries no signal about a genuine problem the way a refusal does.
+EFFECTOR_REPLAYED = Counter(
+    "effector_replayed_total",
+    "Detonations that repeated a result already applied to an already-terminal row",
+)
+# Present at 0 from startup, same reasoning as REMOVAL_UNKNOWN_ASSET_DROPPED
+# above: a reason label with no series yet reads as "cannot happen", not
+# "hasn't happened".
+for _reason in ("unknown_launcher", "no_fire", "conflicting_detonation"):
+    EFFECTOR_REFUSED.labels(reason=_reason)
+
 
 def start_metrics_server() -> int:
     """Start the Prometheus HTTP endpoint. Returns the port it bound."""

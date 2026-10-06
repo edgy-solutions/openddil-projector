@@ -79,6 +79,24 @@ mappings:
     # retention.ms, so the store and the log agree on how long an alert lives.
     retention_hours: 720
 
+  # DIS Fire/Detonation launch records. mode: custom
+  # means this handler owns its own Postgres I/O (an admission-check READ
+  # before Fire's write, and an update-only, old-state-dependent write for
+  # Detonation) instead of returning a plain Write -- see
+  # handlers/effector_launch.py. Deliberately NO retention_hours and NO
+  # asset_ttl_hours: effector_launcher_counts.expended is a running SUM over
+  # this table, and it must never decrease, or `remaining` would rebound
+  # upward as rows aged out. (This also means build_prune_targets can never
+  # select this table: its mode filter only matches
+  # "append"+retention_hours or "upsert"+asset_ttl_hours, and "custom"
+  # matches neither.)
+  - topic: effector-events
+    handler: effector_launch
+    table: effector_launch
+    consumer_group: projector-effector-launch
+    decode_as: json
+    mode: custom
+
   - topic: asset-telemetry-windows
     handler: telemetry_windows
     table: asset_telemetry_windows

@@ -22,7 +22,15 @@ class Mapping:
     table: str
     consumer_group: str
     decode_as: str
-    mode: str  # "upsert" | "append"
+    # "upsert" (compacted topic -> UPSERT by key_columns), "append" (event
+    # stream -> INSERT, with retention_hours pruning), or "custom" (the
+    # handler owns its own Postgres I/O — called as
+    # `await handler(key, decoded, pool)` instead of returning a Write; see
+    # handlers/effector_launch.py, the one user of it). "custom" mappings
+    # are excluded from build_prune_targets automatically (its mode filter
+    # only matches "append"/retention_hours or "upsert"/asset_ttl_hours) and
+    # from _coalesce's upsert-only dedup — every message is processed.
+    mode: str
     # Append-mode only: drop rows older than this many hours (the
     # tactical_events 24h rolling window). Hourly cleanup loop runs
     # the DELETE; key column is "time".

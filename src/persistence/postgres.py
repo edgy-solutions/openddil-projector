@@ -282,6 +282,177 @@ class PostgresPool:
         except (ValueError, IndexError):  # pragma: no cover
             return 0
 
+    # -- effector_launch (launch-record admission/termination) -------------
+    #
+    # `effector_launch` is the one table in this projector whose handler owns
+    # its own Postgres I/O (config.Mapping mode "custom" — see handlers/
+    # effector_launch.py and main.py's dispatch branch for it), because two
+    # of its three operations cannot be expressed as a single pure Write:
+    #
+    #   * Fire needs a READ before it decides whether to write at all (the
+    #     launcher-admission check) — `row_exists` below, a generic version
+    #     of the EXISTS-join idiom `build_prune_sql` already uses.
+    #   * Detonation needs to know the row's OLD terminal_state to tell
+    #     apart "no matching Fire" / "a real result replacing an
+    #     already-timed-out row" / "a duplicate of an already-terminal row"
+    #     / "the normal case" — a plain UPDATE's rows-affected count (which
+    #     `execute()` already reports for mode="update", so that ability did
+    #     not need adding) can only ever distinguish zero from non-zero, not
+    #     which of the three non-zero cases happened. `apply_effector_
+    #     detonation` below reads the old value with SELECT ... FOR UPDATE
+    #     and decides inside the same transaction.
+    #
+    # Fire's own write, once admitted, needs nothing bespoke — it is a plain
+    # `Write(mode="append", ...)` through the existing `execute()`/`build_sql`
+    # path above, same ON CONFLICT DO NOTHING idempotency every other
+    # append-mode handler gets for free.
+
+    @staticmethod
+    def build_row_exists_sql(table: str, column: str) -> str:
+        """Pure — unit testable without a live Postgres, same as `build_sql`.
+        $1 = the value to look for."""
+        return f'SELECT EXISTS (SELECT 1 FROM "{table}" WHERE "{column}" = $1)'
+
+    async def row_exists(self, table: str, column: str, value: Any) -> bool:
+        """Generic admission-style check: does any row have `column` = value?
+        Used by the effector_launch Fire path to confirm the launcher is a
+        known asset (a `telemetry_latest_state` row exists for it) before
+        admitting the launch."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.row_exists before connect()")
+        sql = self.build_row_exists_sql(table, column)
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(sql, value))
+
+    async def apply_effector_detonation(
+        self,
+        *,
+        event_urn: str,
+        terminal_state: str,
+        detonation_result: int,
+        terminated_at: Any,
+        now: Any,
+    ) -> tuple[str, int | None]:
+        """Apply a Detonation to `effector_launch` by event_urn. Returns
+        (outcome, old_detonation_result) where outcome is one of:
+
+          "updated"     — the row was in flight (terminal_state IS NULL);
+                          now resolved with a real result.
+          "late"        — the row was already 'unresolved' (the timeout
+                          sweep fired first); the real result replaces it
+                          and late_terminal is set true. A termination
+                          event outranks a timeout inference.
+          "replayed"    — the row was already terminal with a real result,
+                          and that result is the SAME detonation_result
+                          this call is carrying -- the same Detonation
+                          reaching the store a second time (e.g. an edge
+                          projector and the HQ projector both admitting the
+                          same Fire and then both applying the same
+                          Detonation). Left unchanged; not a refusal.
+          "conflicting" — the row was already terminal with a real result,
+                          and that result is a DIFFERENT detonation_result
+                          -- two different termination claims for the same
+                          event_urn. Left unchanged; a real problem, unlike
+                          "replayed".
+          "no_fire"     — no row exists for this event_urn; nothing to
+                          update.
+
+        old_detonation_result is the row's previous value (None if no row
+        existed), for a caller that wants to log what the new result
+        conflicted with.
+
+        SELECT ... FOR UPDATE then a conditional UPDATE in the same
+        transaction: these outcomes depend on the row's OLD terminal_state
+        (and, for the terminal case, its OLD detonation_result), which a
+        single WHERE-matched UPDATE's rows-affected count cannot
+        distinguish (see the module-level comment above this method).
+        """
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.apply_effector_detonation before connect()"
+            )
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    'SELECT "terminal_state", "detonation_result" '
+                    'FROM "effector_launch" WHERE "event_urn" = $1 FOR UPDATE',
+                    event_urn,
+                )
+                if row is None:
+                    return "no_fire", None
+                old_state = row["terminal_state"]
+                old_result = row["detonation_result"]
+                if old_state is not None and old_state != "unresolved":
+                    if old_result == detonation_result:
+                        return "replayed", old_result
+                    return "conflicting", old_result
+                late = old_state == "unresolved"
+                await conn.execute(
+                    'UPDATE "effector_launch" SET '
+                    '"terminal_state" = $1, "detonation_result" = $2, '
+                    '"terminated_at" = $3, "late_terminal" = $4, '
+                    '"updated_at" = $5 '
+                    'WHERE "event_urn" = $6',
+                    terminal_state, detonation_result, terminated_at,
+                    late, now, event_urn,
+                )
+                return ("late" if late else "updated"), old_result
+
+    @staticmethod
+    def build_effector_timeout_sweep_sql() -> str:
+        """UPDATE, never DELETE — same discipline as
+        `build_staleness_sweep_sql` (ADR-0044 rule 3, "no deletes on the
+        asset path"; effector_launch is not asset-ttl-pruned at all — see
+        projector_config.yaml's effector-events entry — but the "never
+        delete a launch row" rule is the same one in spirit: expended must
+        never decrease).
+
+        $1 = this reader's own now, $2 = EFFECTOR_TERMINAL_TIMEOUT_S. Only
+        rows still in flight (terminal_state IS NULL) and past the timeout
+        are touched."""
+        return (
+            'UPDATE "effector_launch" SET '
+            '"terminal_state" = \'unresolved\', "terminated_at" = $1, '
+            '"updated_at" = $1 '
+            'WHERE "terminal_state" IS NULL '
+            'AND "launched_at" < $1::timestamptz - ($2 || \' seconds\')::interval'
+        )
+
+    async def sweep_effector_timeouts(self, *, timeout_s: float, now: Any) -> int:
+        """Mark in-flight rows past EFFECTOR_TERMINAL_TIMEOUT_S as
+        'unresolved'. Returns rows touched."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.sweep_effector_timeouts before connect()")
+        sql = self.build_effector_timeout_sweep_sql()
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, now, str(timeout_s))
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):  # pragma: no cover
+            return 0
+
+    async def replace_effector_declared_load(
+        self, rows: list[tuple[str, str, str, int]]
+    ) -> None:
+        """Replace `effector_declared_load`'s entire contents in one
+        transaction (startup-only; see handlers/effector_declared_load.py).
+        Empty `rows` empties the table, so every `remaining` in
+        `effector_launcher_counts` then reads NULL rather than 0."""
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.replace_effector_declared_load before connect()"
+            )
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute('DELETE FROM "effector_declared_load"')
+                if rows:
+                    await conn.executemany(
+                        'INSERT INTO "effector_declared_load" '
+                        '("load_key", "key_kind", "munition_type", "declared") '
+                        "VALUES ($1, $2, $3, $4)",
+                        rows,
+                    )
+
     @staticmethod
     def build_prune_sql(table: str, time_column: str, *,
                          asset_id_keyed: bool) -> str:
