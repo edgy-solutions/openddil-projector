@@ -22,9 +22,12 @@ Wire shape (confirmed against openddil-sensor-ingest/dis_ingestor.py
 category/subcategory/specific/extra -- DIS 1278.1's own prose names for the
 EntityType 7-tuple, not opendis's attribute spelling), `quantity`,
 `detonation_result` (Detonation only), `ingest_timestamp`, and a nested
-`provenance: {edge_id, region_id}` (DIS-sourced, so never carries
-originator_nation/releasable_to -- `releasability_from` simply returns {}
-for it, the same as it does for telemetry_latest's DIS path).
+`provenance: {edge_id, region_id, originator_nation?, releasable_to?}` --
+the launch's own labels, stamped at ingress by the dis-effector mapping
+from its launcher's releasability.yaml row (ADR-0029 §3), not derived here.
+`releasability_from` reads them exactly like any other record's
+provenance: present when the launcher is declared, absent when it is not
+-- the same absent-stays-absent rule as telemetry_latest's DIS path.
 """
 from __future__ import annotations
 
