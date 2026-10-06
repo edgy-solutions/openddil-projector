@@ -88,6 +88,14 @@ jobs:
           repository: edgy-solutions/openddil-contracts
           path: openddil-contracts
 
+      # Sibling too: test_effector_launch.py pins the effector_launcher_counts
+      # view's SQL text from parents[3]/"openddil-stack"/"schema"/"migrations".
+      - name: Checkout stack (sibling — supplies schema/migrations)
+        uses: actions/checkout@v4
+        with:
+          repository: edgy-solutions/openddil-stack
+          path: openddil-stack
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
