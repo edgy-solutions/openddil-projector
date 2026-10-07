@@ -35,7 +35,48 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
+import yaml
+
 log = logging.getLogger("edge_assignment")
+
+
+# ----- duplicate-key-refusing YAML loader -----------------------------------
+
+class _NoDuplicateKeysLoader(yaml.SafeLoader):
+    """SafeLoader whose mapping constructor refuses a duplicate key.
+
+    PyYAML's stock mapping constructor is silent last-wins: a key repeated
+    in the same mapping just overwrites the earlier value, with nothing in
+    the API that says so. For this module's static_map (asset_id -> {edge_id,
+    region_id}) that silence is dangerous -- two conflicting edge
+    assignments for the same asset_id collapse into whichever one happens to
+    sort last in the file, and an operator reading the file top-to-bottom
+    would reasonably expect the FIRST one to win, or at least to be told
+    they conflict. Refuse instead of guessing.
+    """
+
+    def construct_mapping(self, node, deep=False):  # noqa: ANN001
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            value = self.construct_object(value_node, deep=deep)
+            if key in mapping:
+                raise ValueError(
+                    f"duplicate YAML key {key!r} "
+                    f"(first value={mapping[key]!r}, second value={value!r})"
+                )
+            mapping[key] = value
+        return mapping
+
+
+def load_yaml_no_duplicate_keys(text: str) -> Any:
+    """yaml.safe_load(text), but raises ValueError naming the id and both
+    values on a duplicate key instead of silently keeping the last one --
+    see _NoDuplicateKeysLoader. Callers (config.py's load_config, and this
+    repo's equivalent in asset-registry-service) use this in place of
+    yaml.safe_load for any file that can define edge_assignment.static_map.
+    """
+    return yaml.load(text, Loader=_NoDuplicateKeysLoader)
 
 
 # ----- types ---------------------------------------------------------------

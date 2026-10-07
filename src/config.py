@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from edge_assignment import load_yaml_no_duplicate_keys
 
 DEFAULT_CONFIG_PATH = "/app/src/config/projector_config.yaml"
 
@@ -75,7 +75,7 @@ def load_config(path: Path | None = None) -> Config:
     """Parse projector_config.yaml into a Config. Raises on a malformed file
     (a bad config at startup IS fatal — unlike a bad Kafka message)."""
     cfg_path = path or _config_path()
-    raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw: dict[str, Any] = load_yaml_no_duplicate_keys(cfg_path.read_text(encoding="utf-8"))
 
     mappings: list[Mapping] = []
     # Single-knob override: PROJECTOR_ASSET_TTL_HOURS forces every
@@ -138,7 +138,7 @@ def load_config(path: Path | None = None) -> Config:
         override_file = Path(override_path)
         if override_file.is_file():
             override_raw = (
-                yaml.safe_load(override_file.read_text(encoding="utf-8")) or {}
+                load_yaml_no_duplicate_keys(override_file.read_text(encoding="utf-8")) or {}
             )
             edge_assignment = override_raw.get("edge_assignment", override_raw)
 

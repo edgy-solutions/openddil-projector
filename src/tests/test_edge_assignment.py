@@ -17,6 +17,7 @@ from edge_assignment import (
     configure_from_config,
     extract_wgs84,
     great_circle_km,
+    load_yaml_no_duplicate_keys,
     nearest_fob_strategy,
     register_strategy,
     resolve_for,
@@ -309,3 +310,73 @@ def test_env_override_missing_file_is_silently_ignored(tmp_path, monkeypatch):
 
     cfg = load_config(main)
     assert cfg.edge_assignment["strategy"] == "chain"
+
+
+# ---- duplicate-key-refusing YAML loader -----------------------------------
+
+def test_load_yaml_no_duplicate_keys_accepts_unique_keys():
+    result = load_yaml_no_duplicate_keys("a: 1\nb: 2\n")
+    assert result == {"a": 1, "b": 2}
+
+
+def test_load_yaml_no_duplicate_keys_rejects_top_level_duplicate():
+    with pytest.raises(ValueError, match="duplicate YAML key 'a'"):
+        load_yaml_no_duplicate_keys("a: 1\na: 2\n")
+
+
+def test_load_yaml_no_duplicate_keys_rejects_nested_duplicate():
+    """static_map's asset_id keys sit inside a nested mapping -- the loader
+    must catch a duplicate there too, not just at the document's top level."""
+    text = (
+        "strategy: static\n"
+        "static_map:\n"
+        "  ASSET_A: {edge_id: edge-1, region_id: region-1}\n"
+        "  ASSET_A: {edge_id: edge-2, region_id: region-2}\n"
+    )
+    with pytest.raises(ValueError, match="duplicate YAML key 'ASSET_A'"):
+        load_yaml_no_duplicate_keys(text)
+
+
+def test_load_yaml_no_duplicate_keys_names_both_values():
+    with pytest.raises(ValueError) as exc:
+        load_yaml_no_duplicate_keys("a: 1\na: 2\n")
+    msg = str(exc.value)
+    assert "first value=1" in msg
+    assert "second value=2" in msg
+
+
+def test_load_config_refuses_duplicate_static_map_key(tmp_path):
+    """End-to-end: a duplicate asset_id in projector_config.yaml's
+    static_map must fail load_config(), not silently keep the last one."""
+    from config import load_config
+
+    main = tmp_path / "projector_config.yaml"
+    main.write_text(
+        "mappings: []\n"
+        "edge_assignment:\n"
+        "  strategy: static\n"
+        "  static_map:\n"
+        "    ASSET_A: {edge_id: edge-1, region_id: region-1}\n"
+        "    ASSET_A: {edge_id: edge-2, region_id: region-2}\n"
+    )
+    with pytest.raises(ValueError, match="duplicate YAML key 'ASSET_A'"):
+        load_config(main)
+
+
+def test_load_config_refuses_duplicate_key_in_override_file(tmp_path, monkeypatch):
+    """Same refusal applies to the EDGE_ASSIGNMENT_CONFIG override file."""
+    from config import load_config
+
+    main = tmp_path / "projector_config.yaml"
+    main.write_text("mappings: []\n")
+    override = tmp_path / "edge-assignment.yaml"
+    override.write_text(
+        "strategy: static\n"
+        "static_map:\n"
+        "  ASSET_A: {edge_id: edge-1, region_id: region-1}\n"
+        "  ASSET_A: {edge_id: edge-2, region_id: region-2}\n"
+    )
+    monkeypatch.setenv("EDGE_ASSIGNMENT_CONFIG", str(override))
+
+    with pytest.raises(ValueError, match="duplicate YAML key 'ASSET_A'"):
+        load_config(main)
