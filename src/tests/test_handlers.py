@@ -217,6 +217,83 @@ def test_telemetry_latest_extracts_operational_state():
     assert "actively_receiving" not in write.jsonb_columns
 
 
+# -- ADR-0044 amendment: "posture, a third column" ---------------------------
+
+def test_telemetry_latest_posture_status_maps_full_enum_to_lowercase_short_name():
+    decoded = {
+        "asset": {"asset_id": "A1"},
+        "operational_state": {
+            "posture_status": "POSTURE_STATUS_MOVING",
+            "posture_since": "2026-10-06T00:01:10Z",
+        },
+        "provenance": {"sample_time": "2026-10-06T00:01:10Z"},
+    }
+    write = get_handler("telemetry_latest")("A1", decoded)
+    assert write.row["posture_status"] == "moving"
+    assert write.row["posture_since"] is not None
+    assert "posture_status" not in write.jsonb_columns
+
+
+def test_telemetry_latest_posture_status_absent_defaults_to_unspecified():
+    # including_default_value_fields is off (decoders/proto.py) -- an
+    # edge that decided POSTURE_STATUS_UNSPECIFIED and one that never set
+    # the field at all are both absent here, and both must land on the
+    # column's own default, not NULL.
+    decoded = {
+        "asset": {"asset_id": "A1"},
+        "operational_state": {},
+        "provenance": {"sample_time": "2026-10-06T00:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("A1", decoded)
+    assert write.row["posture_status"] == "unspecified"
+    assert write.row["posture_since"] is None
+
+
+def test_telemetry_latest_posture_status_absent_operational_state_block():
+    # Mobile-asset feeds that leave operational_state nil entirely (most
+    # DIS/sim-a traffic today) must still get the default, not a KeyError.
+    decoded = {
+        "asset": {"asset_id": "A1"},
+        "provenance": {"sample_time": "2026-10-06T00:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("A1", decoded)
+    assert write.row["posture_status"] == "unspecified"
+    assert write.row["posture_since"] is None
+
+
+def test_telemetry_latest_posture_status_every_enum_value_maps():
+    for full, short in [
+        ("POSTURE_STATUS_UNSPECIFIED", "unspecified"),
+        ("POSTURE_STATUS_EMPLACED", "emplaced"),
+        ("POSTURE_STATUS_MARCH_ORDERED", "march_ordered"),
+        ("POSTURE_STATUS_MOVING", "moving"),
+        ("POSTURE_STATUS_EMPLACING", "emplacing"),
+    ]:
+        decoded = {
+            "asset": {"asset_id": "A1"},
+            "operational_state": {"posture_status": full},
+            "provenance": {},
+        }
+        write = get_handler("telemetry_latest")("A1", decoded)
+        assert write.row["posture_status"] == short, full
+
+
+def test_telemetry_latest_status_only_record_omits_posture_fields():
+    # Same discipline as the other operational_state axes: a status-only
+    # (Remove-Entity-shaped) record must not touch posture either.
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "operational_state": {
+            "operational_status": "OPERATIONAL_STATUS_REMOVED",
+            "posture_status": "POSTURE_STATUS_MOVING",
+        },
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert "posture_status" not in write.row
+    assert "posture_since" not in write.row
+
+
 # -- ADR-0044 lifecycle slice "A": status-only records -----------------------
 
 _STATUS_ONLY_ALLOWED_KEYS = {

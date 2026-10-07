@@ -38,6 +38,28 @@ from .base import (now_utc, parse_timestamp, releasability_from,
 
 TABLE = "telemetry_latest_state"
 
+_POSTURE_STATUS_PREFIX = "POSTURE_STATUS_"
+
+
+def _posture_status_value(op_state: dict[str, Any]) -> str:
+    """ADR-0044 amendment ("posture, a third column"). op_state's
+    posture_status is the proto enum's full name string (e.g.
+    "POSTURE_STATUS_MOVING"), or absent -- including_default_value_fields
+    is off (see decoders/proto.py), so the zero value POSTURE_STATUS_
+    UNSPECIFIED is indistinguishable from the field never having been set
+    at all. Both map to 'unspecified' here, which is also the column's
+    own default and the edge state machine's cold-start value, so there is
+    no distinction being lost. Every other enum column here (power_state,
+    functional_mode, health_state) stores the proto's full enum-name
+    string as-is; posture_status is the one column whose CHECK constraint
+    (schema.hcl) expects the short lower-case form, so it is mapped here."""
+    raw = op_state.get("posture_status")
+    if not raw:
+        return "unspecified"
+    if raw.startswith(_POSTURE_STATUS_PREFIX):
+        return raw[len(_POSTURE_STATUS_PREFIX):].lower()
+    return raw.lower()
+
 
 def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     asset = decoded.get("asset") or {}
@@ -158,6 +180,16 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "health_state":          op_state.get("health_state"),
         "actively_receiving":    op_state.get("actively_receiving"),
         "actively_transmitting": op_state.get("actively_transmitting"),
+        # ADR-0044 amendment ("posture, a third column"). Decided ONCE, at
+        # the edge tier's state machine; this handler stores the decided
+        # value unchanged, on every full-row record (same tier at every
+        # echelon runs this same handler on the bridged topic, so every
+        # tier ends up storing the edge's decision). Unlike
+        # operational_status below, there is no "omit to preserve a prior
+        # terminal value" concern -- posture is never a one-way claim, so
+        # it is always written, the same way reporting_status always is.
+        "posture_status": _posture_status_value(op_state),
+        "posture_since": parse_timestamp(op_state.get("posture_since")),
         # ADR-0044 lifecycle slice 1: reporting_status moves on the arrival
         # of a record, unconditionally — any message, from any producer,
         # means this reader just heard from the asset. Never gated on
