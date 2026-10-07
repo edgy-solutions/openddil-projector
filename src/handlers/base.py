@@ -378,9 +378,11 @@ def resolve_origin_or_derive(
 ) -> dict[str, str]:
     """For customer-feed paths whose wire shape carries no edge_id.
 
-    If the message DOES carry edge_id/region_id (the DIS path stamps them
-    upstream), pass them through. Otherwise derive via the configured
-    edge_assignment strategy (nearest-FOB, asset_id_prefix, …); see
+    Provenance first, always: if the message DOES carry edge_id/region_id
+    (the DIS path stamps them upstream), pass them through unchanged and
+    never consult the strategy below. Only when provenance has no edge
+    does this derive one via the configured edge_assignment strategy
+    (nearest_fob, static -- i.e. static_map --, chain, …); see
     src/edge_assignment.py. Falls back to the configured last-resort
     (typically edge-unspecified / region-unspecified) when the strategy
     has nothing to go on.
