@@ -34,7 +34,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from metrics import EFFECTOR_LATE_TERMINAL, EFFECTOR_REFUSED, EFFECTOR_REPLAYED
+from metrics import (EFFECTOR_LATE_TERMINAL, EFFECTOR_REFUSED, EFFECTOR_REPLAYED,
+                     EFFECTOR_RESUPPLY_SEEN)
 from persistence import PostgresPool, Write
 
 from .base import (now_utc, parse_timestamp, refuse_row, releasability_from,
@@ -167,5 +168,9 @@ async def handle(key: str, decoded: dict[str, Any], pool: PostgresPool) -> None:
         await _handle_fire(decoded, pool)
     elif pdu_type == "detonation":
         await _handle_detonation(decoded, pool)
+    elif pdu_type == "resupply_received":
+        # Not a launch: remaining-with-resupply lives in fusion.
+        EFFECTOR_RESUPPLY_SEEN.inc()
+        log.debug("resupply_received %s: no launch row", decoded.get("event_urn"))
     else:
         refuse_row("effector_launch", "unknown_pdu_type", str(pdu_type))

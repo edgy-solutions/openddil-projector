@@ -275,3 +275,29 @@ def test_effector_launcher_counts_view_coalesces_asset_before_variant():
     assert 'COALESCE("dl_asset"."declared", "dl_variant"."declared")' in sql
     assert '"dl_asset"."key_kind" = \'asset\'' in sql
     assert '"dl_variant"."key_kind" = \'variant\'' in sql
+
+
+# -- resupply_received: not a launch, not a refusal -----------------------------
+
+async def test_resupply_writes_nothing_and_is_not_a_refusal():
+    from handlers import base
+    pool = _FakePool(admitted=True)
+    record = {
+        "pdu_type": "resupply_received",
+        "event_urn": "dis-resupply:1:58:1001:7",
+        "launcher_urn": "dis:1:58:1001",
+        "supplier_urn": None,
+        "supplies": [{"munition_type": {"kind": 2, "domain": 9, "country": 225,
+                                        "category": 2, "subcategory": 1,
+                                        "specific": 1, "extra": 0},
+                      "quantity": 4}],
+    }
+    refused_before = dict(base._refused)
+    seen_before = metrics.EFFECTOR_RESUPPLY_SEEN._value.get()
+
+    await effector_launch.handle("dis:1:58:1001", record, pool)
+
+    assert pool.executed == []
+    assert pool.detonation_calls == []
+    assert base._refused == refused_before
+    assert metrics.EFFECTOR_RESUPPLY_SEEN._value.get() == seen_before + 1

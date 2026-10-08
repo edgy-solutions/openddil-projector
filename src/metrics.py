@@ -71,6 +71,13 @@ EFFECTOR_REPLAYED = Counter(
     "effector_replayed_total",
     "Detonations that repeated a result already applied to an already-terminal row",
 )
+# A Resupply Received is not a launch: the launch table records launches only,
+# and remaining-with-resupply lives in fusion. Counted here so it reads as
+# seen-and-deliberately-skipped rather than refused.
+EFFECTOR_RESUPPLY_SEEN = Counter(
+    "effector_resupply_seen_total",
+    "Resupply Received records seen by the effector_launch handler (no row written)",
+)
 # Present at 0 from startup, same reasoning as REMOVAL_UNKNOWN_ASSET_DROPPED
 # above: a reason label with no series yet reads as "cannot happen", not
 # "hasn't happened".
