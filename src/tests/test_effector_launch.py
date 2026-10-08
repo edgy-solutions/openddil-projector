@@ -123,6 +123,22 @@ async def test_fire_admitted_writes_append_row():
     assert after == before  # unchanged — this Fire was admitted
 
 
+async def test_fire_writes_munition_asset_id_when_named():
+    pool = _FakePool(admitted=True)
+    fire = _fire()
+    fire["munition_urn"] = "dis:1:1:2001"
+    await effector_launch.handle("dis:1:58:1001", fire, pool)
+    assert pool.executed[0].row["munition_asset_id"] == "dis:1:1:2001"
+
+
+async def test_fire_writes_null_munition_asset_id_when_none():
+    pool = _FakePool(admitted=True)
+    fire = _fire()
+    fire["munition_urn"] = None
+    await effector_launch.handle("dis:1:58:1001", fire, pool)
+    assert pool.executed[0].row["munition_asset_id"] is None
+
+
 async def test_fire_unknown_launcher_refuses_and_writes_nothing():
     pool = _FakePool(admitted=False)
     before = metrics.EFFECTOR_REFUSED.labels(reason="unknown_launcher")._value.get()

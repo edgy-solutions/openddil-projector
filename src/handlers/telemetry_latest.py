@@ -163,6 +163,10 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         **releasability_from(provenance),
         "platform_variant": asset.get("platform_variant"),
         "callsign": asset.get("callsign"),
+        # AssetSubsystem enum name (e.g. "ASSET_SUBSYSTEM_SENSOR"). The JSON
+        # decode omits an UNSPECIFIED value, so absent -> None -> NULL =
+        # the record describes the platform itself.
+        "subsystem": asset.get("subsystem"),
         # ForceAffiliation enum -> its string name (e.g. "FORCE_FRIENDLY").
         "force_id": asset.get("force"),
         "kinematics": kinematics,

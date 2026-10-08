@@ -18,7 +18,7 @@ through the ordinary `pool.execute()` path -- no bespoke SQL needed there.
 Wire shape (confirmed against openddil-sensor-ingest/dis_ingestor.py
 `_extract_fire` / `_extract_detonation` / `_munition_type_dict`): `pdu_type`,
 `event_urn` ("dis-event:site:application:eventNumber"), `launcher_urn`,
-`target_urn` (or null), `munition_type` (dict with keys kind/domain/country/
+`munition_urn` (or null), `target_urn` (or null), `munition_type` (dict with keys kind/domain/country/
 category/subcategory/specific/extra -- DIS 1278.1's own prose names for the
 EntityType 7-tuple, not opendis's attribute spelling), `quantity`,
 `detonation_result` (Detonation only), `ingest_timestamp`, and a nested
@@ -107,6 +107,7 @@ async def _handle_fire(decoded: dict[str, Any], pool: PostgresPool) -> None:
     row = {
         "event_urn": event_urn,
         "launcher_asset_id": launcher_urn,
+        "munition_asset_id": decoded.get("munition_urn"),
         "munition_type": munition_type_key(decoded.get("munition_type")),
         "quantity": int(decoded.get("quantity", 0)),
         "target_asset_id": decoded.get("target_urn"),

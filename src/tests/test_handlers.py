@@ -177,6 +177,26 @@ def test_telemetry_latest_flattens_identity_keeps_blobs():
     assert write.row["actively_transmitting"] is None
 
 
+def test_telemetry_latest_writes_declared_subsystem():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099", "subsystem": "ASSET_SUBSYSTEM_SENSOR"},
+        "kinematics": {"position": {"ecef": {"x": {"value": 1.0, "unit": "m"}}}},
+        "provenance": {"sample_time": "2026-05-14T03:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.row["subsystem"] == "ASSET_SUBSYSTEM_SENSOR"
+
+
+def test_telemetry_latest_undeclared_subsystem_is_null():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1099"},
+        "kinematics": {"position": {"ecef": {"x": {"value": 1.0, "unit": "m"}}}},
+        "provenance": {"sample_time": "2026-05-14T03:00:00Z"},
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1099", decoded)
+    assert write.row["subsystem"] is None
+
+
 def test_telemetry_latest_extracts_operational_state():
     """Phase 5: when EntityTelemetryEvent carries operational_state (the
     customer-overlay sensor branch is the first producer; future DIS / AFSim /
