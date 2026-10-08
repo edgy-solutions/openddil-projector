@@ -84,6 +84,26 @@ EFFECTOR_RESUPPLY_SEEN = Counter(
 for _reason in ("unknown_launcher", "no_fire", "conflicting_detonation"):
     EFFECTOR_REFUSED.labels(reason=_reason)
 
+# -- link heartbeat / link_monitor --------------------------------------------
+LINK_HEARTBEATS_PRODUCED = Counter(
+    "projector_link_heartbeats_produced_total",
+    "Link heartbeat records handed to this tier's own broker",
+)
+LINK_HEARTBEATS_RECEIVED = Counter(
+    "projector_link_heartbeats_received_total",
+    "Link heartbeats that arrived at HQ for an expected link id",
+    ["link_id"],
+)
+# reason: malformed (undecodable or empty link_id) or unexpected (id not in
+# LINK_EXPECTED_IDS). Present at 0 from startup, as above.
+LINK_HEARTBEATS_REJECTED = Counter(
+    "projector_link_heartbeats_rejected_total",
+    "Link heartbeat payloads skipped by the HQ link monitor",
+    ["reason"],
+)
+for _reason in ("malformed", "unexpected"):
+    LINK_HEARTBEATS_REJECTED.labels(reason=_reason)
+
 
 def start_metrics_server() -> int:
     """Start the Prometheus HTTP endpoint. Returns the port it bound."""

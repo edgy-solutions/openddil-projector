@@ -40,6 +40,7 @@ from edge_buffer_monitor import edge_buffer_loop
 from effector_declared_load import DeclaredLoadConfigError, load_declared_load
 from effector_sweep import effector_sweep_loop
 from handlers import get_handler
+from link_monitor import link_monitor_enabled, link_monitor_loop
 from metrics import (
     DECODE_ERRORS,
     MESSAGES_CONSUMED,
@@ -398,6 +399,18 @@ async def lag_loop(workers: list[ConsumerWorker]) -> None:
             await loop.run_in_executor(None, w.update_lag_gauge)
 
 
+def start_monitor_tasks(pool: PostgresPool) -> list[asyncio.Task]:
+    """The two env-gated monitors: the edge buffer monitor (which also hosts
+    the link heartbeat, gated by LINK_HEARTBEAT_ENABLED) and the HQ link
+    monitor (LINK_MONITOR_ENABLED, default off)."""
+    tasks: list[asyncio.Task] = []
+    if os.getenv("BUFFER_MONITOR_ENABLED", "true").lower() == "true":
+        tasks.append(asyncio.create_task(edge_buffer_loop(pool)))
+    if link_monitor_enabled():
+        tasks.append(asyncio.create_task(link_monitor_loop(pool)))
+    return tasks
+
+
 async def main() -> None:
     config: Config = load_config()
     if not config.mappings:
@@ -488,8 +501,7 @@ async def main() -> None:
     # ("true" by default to preserve single-instance behavior; set "false"
     # on the additional per-edge projector instances). Multi-edge buffer
     # monitoring (per-edge bridge-group lag) is 6c rewire territory.
-    if os.getenv("BUFFER_MONITOR_ENABLED", "true").lower() == "true":
-        tasks.append(asyncio.create_task(edge_buffer_loop(pool)))
+    tasks.extend(start_monitor_tasks(pool))
 
     log.info("projector running: %d topic consumers", len(workers))
     await stop_event.wait()

@@ -317,6 +317,16 @@ async def edge_buffer_loop(pool: PostgresPool) -> None:
         BRIDGE_CONSUMER_GROUP, BRIDGE_TOPICS, PROBE_INTERVAL_S,
         EXCHANGE_PERIOD_S, LINK_SEVER_AFTER_S, LINK_RESTORE_EXCHANGES,
     )
+    heartbeat_task = start_link_heartbeat()
+    try:
+        await _edge_buffer_probe_loop(pool, loop, reachability)
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+
+
+async def _edge_buffer_probe_loop(pool: PostgresPool, loop, reachability) -> None:
+    global _last_bridge_lag
     while True:
         await asyncio.sleep(PROBE_INTERVAL_S)
         now = loop.time()
@@ -347,6 +357,7 @@ async def edge_buffer_loop(pool: PostgresPool) -> None:
         # A failed probe feeds the reachability state None/None, same as a
         # relay that's gone quiet — see LinkReachability's docstring on why
         # that's deliberate and not a rebase.
+        _last_bridge_lag = lag if healthy else LAG_UNKNOWN
         reachability.observe(now, committed_sum, lag if healthy else None)
         severed = reachability.severed
         probe_healthy = healthy and severed is not None
@@ -355,3 +366,135 @@ async def edge_buffer_loop(pool: PostgresPool) -> None:
             await pool.execute(_build_write(lag, bool(severed), probe_healthy))
         except Exception as exc:  # noqa: BLE001 - never let the monitor crash
             log.warning("edge_buffer_status write failed: %s", exc)
+
+
+# -- link heartbeat ----------------------------------------------------------
+# One LinkHeartbeat per period to this tier's OWN broker, keyed by LINK_ID.
+# The relay forwards it with the data, so its arrival at HQ is the
+# reachability evidence; see link_monitor.py for why it is not a pod probe.
+
+LINK_ID = os.getenv("LINK_ID", "")
+LINK_HEARTBEAT_PERIOD_S = float(os.getenv("LINK_HEARTBEAT_PERIOD_S", "2"))
+LINK_IDLE_AFTER_S = float(os.getenv("LINK_IDLE_AFTER_S", "30"))
+LINK_TRAFFIC_TOPICS = [
+    t.strip() for t in os.getenv("LINK_TRAFFIC_TOPICS", "").split(",") if t.strip()
+]
+LINK_HEARTBEAT_TOPIC = "link-heartbeat"
+
+# The bridge lag the probe loop last computed, for the heartbeat to carry.
+# LAG_UNKNOWN until the first healthy probe.
+_last_bridge_lag = LAG_UNKNOWN
+
+
+def link_heartbeat_enabled() -> bool:
+    return os.getenv("LINK_HEARTBEAT_ENABLED", "false").lower() == "true"
+
+
+class TrafficMeter:
+    """Whether the source topics were moving, from the sum of their log-end
+    offsets. Pure: the caller supplies the monotonic `now` and the sum
+    (None when no traffic topic was readable).
+
+    ACTIVE if the sum advanced within the last `idle_after_s`; IDLE if it
+    has not advanced for that long; UNSPECIFIED before one full window has
+    elapsed since the first reading, and whenever the reading is None. A
+    window of evidence is needed before saying IDLE, and an unreadable
+    source says nothing either way.
+    """
+
+    def __init__(self, idle_after_s: float) -> None:
+        self._idle_after_s = idle_after_s
+        self._first_time: float | None = None
+        self._last_sum: int | None = None
+        self._last_advance: float | None = None
+
+    def observe(self, now: float, offset_sum: int | None) -> str:
+        if offset_sum is None:
+            return "UNSPECIFIED"
+        if self._first_time is None:
+            self._first_time = now
+            self._last_sum = offset_sum
+            self._last_advance = now
+            return "UNSPECIFIED"
+        if offset_sum > (self._last_sum or 0):
+            self._last_advance = now
+        # A drop (topic recreated) rebases without counting as movement.
+        self._last_sum = offset_sum
+        if now - self._first_time < self._idle_after_s:
+            return "UNSPECIFIED"
+        if now - self._last_advance <= self._idle_after_s:
+            return "ACTIVE"
+        return "IDLE"
+
+
+def _probe_traffic_sum() -> int | None:
+    """Sum of log-end offsets over LINK_TRAFFIC_TOPICS on this broker, or
+    None if none of them could be read."""
+    if not LINK_TRAFFIC_TOPICS:
+        return None
+    consumer = Consumer({
+        "bootstrap.servers": KAFKA_BROKERS,
+        "group.id": "edge-buffer-probe",
+        "enable.auto.commit": False,
+    })
+    try:
+        total = 0
+        readable = False
+        for topic in LINK_TRAFFIC_TOPICS:
+            try:
+                meta = consumer.list_topics(topic, timeout=5).topics.get(topic)
+                if meta is None or meta.error is not None:
+                    continue
+                for p in meta.partitions:
+                    _, hi = consumer.get_watermark_offsets(TopicPartition(topic, p), timeout=5)
+                    total += hi
+                    readable = True
+            except Exception as exc:  # noqa: BLE001 - one bad topic is not fatal
+                _warn_once("traffic-" + topic, "link-heartbeat: cannot read %s: %s", topic, exc)
+        return total if readable else None
+    finally:
+        consumer.close()
+
+
+async def link_heartbeat_loop() -> None:
+    """Produce one heartbeat per period. Never raises: a failure here must
+    not touch the edge_buffer_status loop that spawned it."""
+    from confluent_kafka import Producer
+    from handlers.base import now_utc
+    from link_heartbeat import encode_heartbeat
+    from metrics import LINK_HEARTBEATS_PRODUCED
+
+    loop = asyncio.get_running_loop()
+    meter = TrafficMeter(LINK_IDLE_AFTER_S)
+    producer = None
+    log.info(
+        "link heartbeat started: link_id=%s period=%.1fs idle_after=%.1fs traffic_topics=%s",
+        LINK_ID, LINK_HEARTBEAT_PERIOD_S, LINK_IDLE_AFTER_S, LINK_TRAFFIC_TOPICS,
+    )
+    while True:
+        await asyncio.sleep(LINK_HEARTBEAT_PERIOD_S)
+        try:
+            try:
+                offset_sum = await loop.run_in_executor(None, _probe_traffic_sum)
+            except Exception as exc:  # noqa: BLE001
+                _warn_once("traffic-probe", "link-heartbeat: traffic probe failed: %s", exc)
+                offset_sum = None
+            traffic = meter.observe(loop.time(), offset_sum)
+            payload = encode_heartbeat(LINK_ID, now_utc(), traffic, _last_bridge_lag)
+            if producer is None:
+                producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
+            producer.produce(LINK_HEARTBEAT_TOPIC, value=payload, key=LINK_ID.encode())
+            producer.poll(0)
+            LINK_HEARTBEATS_PRODUCED.inc()
+        except Exception as exc:  # noqa: BLE001 - heartbeat is best-effort
+            _warn_once("heartbeat-produce", "link-heartbeat: produce failed: %s", exc)
+
+
+def start_link_heartbeat() -> "asyncio.Task | None":
+    """Start the heartbeat task when enabled and LINK_ID is set; else None."""
+    if not link_heartbeat_enabled():
+        return None
+    if not LINK_ID:
+        log.error("LINK_HEARTBEAT_ENABLED is true but LINK_ID is empty; no heartbeat will be produced")
+        return None
+    return asyncio.create_task(link_heartbeat_loop())
