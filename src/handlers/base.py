@@ -293,6 +293,13 @@ def releasability_from(provenance_dict: dict | None) -> dict[str, Any]:
     return {"originator_nation": nation, "releasable_to": list(releasable)}
 
 
+def _label_source(decoded: dict[str, Any]) -> dict[str, Any]:
+    nested = decoded.get("provenance")
+    if isinstance(nested, dict) and nested.get("originator_nation"):
+        return nested
+    return decoded
+
+
 def aggregate_releasability_from(provenance_dict: dict | None) -> dict[str, Any]:
     """Releasability for an AGGREGATE row. Never falls back to `{}`.
 

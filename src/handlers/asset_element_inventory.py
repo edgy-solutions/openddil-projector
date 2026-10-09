@@ -38,7 +38,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, resolve_origin_or_derive
+from .base import _label_source, now_utc, releasability_from, resolve_origin_or_derive
 
 TABLE = "inventory_items"
 HANDLER_LABEL = "asset_element_inventory"
@@ -80,6 +80,11 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "available_count": available,
         "allocated_count": allocated,
         "updated_at": now_utc(),
+        # ADR-0029 §3. logistics-sim stamps `originator_nation` /
+        # `releasable_to` at the TOP LEVEL of the envelope (both absent when
+        # unlabelled); a nested `provenance` block is tolerated too. The
+        # projector only carries them.
+        **releasability_from(_label_source(decoded)),
     }
     return Write(
         table=TABLE,

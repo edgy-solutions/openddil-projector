@@ -36,7 +36,7 @@ from typing import Any
 
 from persistence import Write
 
-from .base import now_utc, releasability_from, resolve_origin_or_derive
+from .base import _label_source, now_utc, releasability_from, resolve_origin_or_derive
 
 TABLE = "asset_element_telemetry"
 HANDLER_LABEL = "asset_element_telemetry"
@@ -50,13 +50,6 @@ def _observed_at_from_ns(observed_at_ns: Any) -> datetime:
         return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
     except (TypeError, ValueError):
         return now_utc()
-
-
-def _label_source(decoded: dict[str, Any]) -> dict[str, Any]:
-    nested = decoded.get("provenance")
-    if isinstance(nested, dict) and nested.get("originator_nation"):
-        return nested
-    return decoded
 
 
 def handle(key: str, decoded: dict[str, Any]) -> Write | None:

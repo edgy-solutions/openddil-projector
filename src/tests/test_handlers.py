@@ -795,3 +795,36 @@ def test_telemetry_windows_provenance_without_nation_omits_labels():
     write = get_handler("telemetry_windows")("A1", decoded)
     assert "originator_nation" not in write.row
     assert "releasable_to" not in write.row
+
+
+# -- releasability labels on element inventory rows ----------------------------
+# inventory_items is a labelled table at the row filter, so the labels the
+# producer sends must reach the row.
+
+def _inventory(**extra):
+    decoded = {"asset_id": "A1", "layer_name": "L1", **extra}
+    return get_handler("asset_element_inventory")("A1", decoded)
+
+
+def test_element_inventory_top_level_labels_reach_row():
+    write = _inventory(originator_nation="ATL", releasable_to=[])
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == []
+
+
+def test_element_inventory_top_level_releasable_to_carried():
+    write = _inventory(originator_nation="ATL", releasable_to=["BDR"])
+    assert write.row["releasable_to"] == ["BDR"]
+
+
+def test_element_inventory_unlabelled_omits_both_keys():
+    write = _inventory()
+    assert "originator_nation" not in write.row
+    assert "releasable_to" not in write.row
+
+
+def test_element_inventory_nested_provenance_labels_carried():
+    write = _inventory(provenance={"originator_nation": "ATL",
+                                   "releasable_to": ["BDR"]})
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
