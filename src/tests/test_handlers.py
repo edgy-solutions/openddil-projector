@@ -743,3 +743,55 @@ def test_label_columns_are_never_jsonb():
     write = get_handler("telemetry_latest")("a", decoded)
     assert "releasable_to" not in write.jsonb_columns
     assert "originator_nation" not in write.jsonb_columns
+
+
+# -- releasability labels on element and window rows ---------------------------
+# The read filter refuses rows with both labels NULL, so the labels the
+# producer sends must reach the row.
+
+def test_element_telemetry_top_level_labels_reach_row():
+    decoded = {"asset_id": "A1", "elements": [],
+               "originator_nation": "ATL", "releasable_to": []}
+    write = get_handler("asset_element_telemetry")("A1", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == []
+
+
+def test_element_telemetry_top_level_releasable_to_carried():
+    decoded = {"asset_id": "A1", "elements": [],
+               "originator_nation": "ATL", "releasable_to": ["BDR"]}
+    write = get_handler("asset_element_telemetry")("A1", decoded)
+    assert write.row["releasable_to"] == ["BDR"]
+
+
+def test_element_telemetry_unlabelled_omits_both_keys():
+    write = get_handler("asset_element_telemetry")(
+        "A1", {"asset_id": "A1", "elements": []})
+    assert "originator_nation" not in write.row
+    assert "releasable_to" not in write.row
+
+
+def test_element_telemetry_nested_provenance_labels_carried():
+    decoded = {"asset_id": "A1", "elements": [],
+               "provenance": {"originator_nation": "ATL",
+                              "releasable_to": ["BDR"]}}
+    write = get_handler("asset_element_telemetry")("A1", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
+
+
+def test_telemetry_windows_provenance_labels_reach_row():
+    decoded = {"asset_id": "A1",
+               "provenance": {"edge_id": "e1", "region_id": "r1",
+                              "originator_nation": "ATL"}}
+    write = get_handler("telemetry_windows")("A1", decoded)
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == []
+
+
+def test_telemetry_windows_provenance_without_nation_omits_labels():
+    decoded = {"asset_id": "A1",
+               "provenance": {"edge_id": "e1", "region_id": "r1"}}
+    write = get_handler("telemetry_windows")("A1", decoded)
+    assert "originator_nation" not in write.row
+    assert "releasable_to" not in write.row

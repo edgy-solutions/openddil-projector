@@ -52,6 +52,13 @@ def _observed_at_from_ns(observed_at_ns: Any) -> datetime:
         return now_utc()
 
 
+def _label_source(decoded: dict[str, Any]) -> dict[str, Any]:
+    nested = decoded.get("provenance")
+    if isinstance(nested, dict) and nested.get("originator_nation"):
+        return nested
+    return decoded
+
+
 def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     asset_id = decoded.get("asset_id") or key
     if not asset_id:
@@ -72,10 +79,11 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "observed_at": _observed_at_from_ns(decoded.get("observed_at_ns")),
         "updated_at": now_utc(),
         **prov,
-        # ADR-0029 §3. logistics-sim stamps these into a top-level
-        # `provenance` block from the same declaration the ingress
-        # mapping reads; the projector only carries them.
-        **releasability_from(decoded.get("provenance")),
+        # ADR-0029 §3. logistics-sim stamps `originator_nation` /
+        # `releasable_to` at the TOP LEVEL of the envelope (both absent when
+        # unlabelled); a nested `provenance` block is tolerated too. The
+        # projector only carries them.
+        **releasability_from(_label_source(decoded)),
     }
 
     return Write(

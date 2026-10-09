@@ -14,7 +14,13 @@ from typing import Any
 
 from persistence import Write
 
-from .base import duration_to_seconds, now_utc, parse_timestamp, resolve_provenance_from_dict
+from .base import (
+    duration_to_seconds,
+    now_utc,
+    parse_timestamp,
+    releasability_from,
+    resolve_provenance_from_dict,
+)
 
 TABLE = "asset_telemetry_windows"
 
@@ -51,6 +57,9 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "element_rollup": decoded.get("element_rollup"),
         "computed_at": parse_timestamp(decoded.get("computed_at")),
         "updated_at": now_utc(),
+        # Labels propagated from the element envelope by faust-edge; absent
+        # stays absent.
+        **releasability_from(decoded.get("provenance")),
     }
 
     return Write(
