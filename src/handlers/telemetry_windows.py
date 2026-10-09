@@ -48,6 +48,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         "component_wear_trends": decoded.get("wear_trends", []),
         "window_duration_seconds": duration_seconds,
         "sample_count": int(sample_count) if sample_count is not None else None,
+        "element_rollup": decoded.get("element_rollup"),
         "computed_at": parse_timestamp(decoded.get("computed_at")),
         "updated_at": now_utc(),
     }
@@ -61,5 +62,6 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
             "fluid_trends",
             "consumable_trends",
             "component_wear_trends",
+            "element_rollup",
         },
     )

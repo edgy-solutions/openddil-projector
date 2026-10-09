@@ -582,6 +582,28 @@ def test_telemetry_windows_renames_wear_trends_column():
     assert write.row["sample_count"] == 30
 
 
+def test_telemetry_windows_element_rollup_stored_verbatim():
+    rollup = {
+        "profile_name": "profile-x",
+        "element_count": 23000,
+        "critical_count": 12,
+        "degraded_count": 340,
+        "avg_temp_c": 41.5,
+        "avg_load_pct": 62.25,
+        "observed_at": "2026-05-14T03:00:00Z",
+        "core_temp_c": 55.0,
+    }
+    decoded = {"asset_id": "A1", "element_rollup": rollup}
+    write = get_handler("telemetry_windows")("A1", decoded)
+    assert write.row["element_rollup"] == rollup
+    assert "element_rollup" in write.jsonb_columns
+
+
+def test_telemetry_windows_without_element_rollup_is_none():
+    write = get_handler("telemetry_windows")("A1", {"asset_id": "A1"})
+    assert write.row["element_rollup"] is None
+
+
 # -- origin-node provenance (ADR-0022) ----------------------------------------
 # Every per-asset projection row carries edge_id / region_id. Single-tier
 # today (constant defaults), but the handler output is shaped for the
