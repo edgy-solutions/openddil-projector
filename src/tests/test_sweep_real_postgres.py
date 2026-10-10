@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from persistence import Write
+from persistence import Revive, Write
 from persistence.postgres import PostgresPool
 
 DSN = os.environ.get("PROJECTOR_TEST_PG_DSN")
@@ -177,3 +177,81 @@ async def test_update_mode_on_existing_row_returns_one(update_pool_and_table):
         row = await conn.fetchrow(
             f'SELECT operational_status FROM "{table}" WHERE asset_id = $1', "known-asset")
     assert row["operational_status"] == "removed"
+
+
+# -- Write.revive (a deactivated asset returns when it reappears) -------------
+#
+# Only a server that plans the statement can show that both CASEs read the
+# OLD row (so the timestamp CASE still sees `deactivated` after the status
+# CASE has "run") and that the bound parameter types resolve.
+
+@pytest.fixture
+async def revive_pool_and_table():
+    pool = PostgresPool(_require_dsn())
+    await pool.connect()
+    table = f"revive_test_{uuid.uuid4().hex[:12]}"
+    async with pool._pool.acquire() as conn:
+        await conn.execute(
+            f'CREATE TABLE "{table}" ('
+            "asset_id text PRIMARY KEY, "
+            "operational_status text NOT NULL DEFAULT 'operational', "
+            "operational_status_at timestamptz, "
+            "updated_at timestamptz NOT NULL)"
+        )
+    try:
+        yield pool, table
+    finally:
+        async with pool._pool.acquire() as conn:
+            await conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        await pool.close()
+
+
+async def _revive_upsert(pool, table, asset_id, at):
+    await pool.execute(Write(
+        table=table,
+        mode="upsert",
+        key_columns=["asset_id"],
+        row={"asset_id": asset_id, "updated_at": at},
+        revive=Revive(
+            column="operational_status",
+            from_values=("deactivated",),
+            to_value="operational",
+            at_column="operational_status_at",
+            at_from="updated_at",
+        ),
+    ))
+
+
+async def _revive_state(pool, table, asset_id):
+    async with pool._pool.acquire() as conn:
+        r = await conn.fetchrow(
+            f'SELECT operational_status, operational_status_at FROM "{table}" '
+            "WHERE asset_id = $1", asset_id)
+    return r["operational_status"], r["operational_status_at"]
+
+
+async def test_revive_returns_deactivated_and_stamps_the_new_time(revive_pool_and_table):
+    pool, table = revive_pool_and_table
+    then = datetime.now(timezone.utc) - timedelta(minutes=5)
+    now = datetime.now(timezone.utc)
+    async with pool._pool.acquire() as conn:
+        await conn.execute(
+            f'INSERT INTO "{table}" VALUES ($1, $2, $3, $3)',
+            "A1", "deactivated", then)
+    await _revive_upsert(pool, table, "A1", now)
+    assert await _revive_state(pool, table, "A1") == ("operational", now)
+
+
+async def test_revive_never_moves_destroyed_or_removed(revive_pool_and_table):
+    pool, table = revive_pool_and_table
+    then = datetime.now(timezone.utc) - timedelta(minutes=5)
+    now = datetime.now(timezone.utc)
+    async with pool._pool.acquire() as conn:
+        for asset_id, status in (("D1", "destroyed"), ("R1", "removed")):
+            await conn.execute(
+                f'INSERT INTO "{table}" VALUES ($1, $2, $3, $3)',
+                asset_id, status, then)
+    await _revive_upsert(pool, table, "D1", now)
+    await _revive_upsert(pool, table, "R1", now)
+    assert await _revive_state(pool, table, "D1") == ("destroyed", then)
+    assert await _revive_state(pool, table, "R1") == ("removed", then)

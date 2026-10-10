@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 
-from persistence import Write
+import pytest
+
+from persistence import Revive, Write
 from persistence.postgres import PostgresPool
 
 
@@ -172,3 +174,79 @@ def test_prune_sql_terminal_predicate_present_for_asset_tables_only():
         "inventory_items", "updated_at", asset_id_keyed=False)
     assert "operational_status" in asset_sql
     assert "operational_status" not in non_asset_sql
+
+
+# -- Write.revive (ADR-0044: `deactivated` is reversible) ---------------------
+
+def _revive_write(**over):
+    kw = dict(
+        table="t",
+        mode="upsert",
+        key_columns=["asset_id"],
+        row={"asset_id": "A1", "x": 1, "updated_at": "now"},
+        revive=Revive(
+            column="operational_status",
+            from_values=("deactivated",),
+            to_value="operational",
+            at_column="operational_status_at",
+            at_from="updated_at",
+        ),
+    )
+    kw.update(over)
+    return Write(**kw)
+
+
+def test_revive_upsert_sql_is_two_cases_on_the_old_row():
+    sql = PostgresPool.build_sql(_revive_write())
+    assert sql == (
+        'INSERT INTO "t" ("asset_id", "x", "updated_at") '
+        "VALUES ($1, $2, $3) "
+        'ON CONFLICT ("asset_id") DO UPDATE SET '
+        '"x" = EXCLUDED."x", "updated_at" = EXCLUDED."updated_at", '
+        '"operational_status_at" = CASE WHEN "t"."operational_status" IN ($4) '
+        'THEN EXCLUDED."updated_at" ELSE "t"."operational_status_at" END, '
+        '"operational_status" = CASE WHEN "t"."operational_status" IN ($4) '
+        'THEN $5 ELSE "t"."operational_status" END'
+    )
+
+
+def test_revive_params_are_numbered_after_the_row_and_bound_in_order():
+    write = _revive_write(revive=Revive(
+        column="operational_status",
+        from_values=("deactivated", "parked"),
+        to_value="operational",
+        at_column="operational_status_at",
+        at_from="updated_at",
+    ))
+    sql = PostgresPool.build_sql(write)
+    assert 'IN ($4, $5) THEN EXCLUDED."updated_at"' in sql
+    assert "THEN $6 ELSE" in sql
+    # never interpolated
+    assert "deactivated" not in sql and "'operational'" not in sql
+    assert PostgresPool._bind_values(write) == [
+        "A1", 1, "now", "deactivated", "parked", "operational",
+    ]
+
+
+def test_no_revive_leaves_sql_and_binds_unchanged():
+    write = _revive_write(revive=None)
+    assert "CASE" not in PostgresPool.build_sql(write)
+    assert PostgresPool._bind_values(write) == ["A1", 1, "now"]
+
+
+def test_revive_outside_upsert_is_refused():
+    for mode in ("append", "update"):
+        with pytest.raises(ValueError):
+            PostgresPool.build_sql(_revive_write(mode=mode))
+
+
+def test_revive_column_that_is_also_a_row_key_is_refused():
+    for extra in ("operational_status", "operational_status_at"):
+        row = {"asset_id": "A1", "updated_at": "now", extra: "x"}
+        with pytest.raises(ValueError):
+            PostgresPool.build_sql(_revive_write(row=row))
+
+
+def test_revive_at_from_missing_from_row_is_refused():
+    with pytest.raises(ValueError):
+        PostgresPool.build_sql(_revive_write(row={"asset_id": "A1", "x": 1}))

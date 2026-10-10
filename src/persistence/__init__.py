@@ -4,6 +4,6 @@
 (upsert/append), the primary-key column(s), and the row dict.
 `PostgresPool` turns a `Write` into SQL and executes it with retry.
 """
-from .postgres import PostgresPool, Write
+from .postgres import PostgresPool, Revive, Write
 
-__all__ = ["PostgresPool", "Write"]
+__all__ = ["PostgresPool", "Revive", "Write"]

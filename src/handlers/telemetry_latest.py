@@ -27,11 +27,13 @@ from __future__ import annotations
 from typing import Any
 
 from edge_assignment import extract_wgs84
-from lifecycle_status import (OPERATIONAL_STATUS_DESTROYED,
+from lifecycle_status import (OPERATIONAL_STATUS_DEACTIVATED,
+                               OPERATIONAL_STATUS_DESTROYED,
+                               OPERATIONAL_STATUS_OPERATIONAL,
                                OPERATIONAL_STATUS_REMOVED,
                                is_dis_destroyed_signal,
                                operational_status_from_op_state)
-from persistence import Write
+from persistence import Revive, Write
 
 from .base import (now_utc, parse_timestamp, releasability_from,
                    resolve_origin_or_derive)
@@ -214,10 +216,26 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # an ordinary non-destroyed update, leave a prior terminal value alone;
     # Postgres's UPSERT only touches columns present in this dict (see
     # PostgresPool.build_sql), so omission is the mechanism, not an
-    # afterthought.
+    # afterthought. The one exception is `deactivated`, which is reversible
+    # (ADR-0044): a record that carries the asset's own kinematics and no
+    # terminal claim proves the asset is back, so `revive` (below) returns
+    # `deactivated` to `operational` in the same upsert.
+    revive = None
     if op_status_claim is not None:
         row["operational_status"] = op_status_claim
         row["operational_status_at"] = now
+    elif kinematics:
+        # Only `deactivated` is in from_values, deliberately. `destroyed`:
+        # a destroyed entity keeps transmitting, so appearance proves
+        # nothing. `removed`: a Remove Entity has no undo on the wire.
+        # Both stay put until a reset empties the stores.
+        revive = Revive(
+            column="operational_status",
+            from_values=(OPERATIONAL_STATUS_DEACTIVATED,),
+            to_value=OPERATIONAL_STATUS_OPERATIONAL,
+            at_column="operational_status_at",
+            at_from="updated_at",
+        )
 
     return Write(
         table=TABLE,
@@ -225,4 +243,5 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         key_columns=["asset_id"],
         row=row,
         jsonb_columns={"kinematics", "sustainment", "provenance"},
+        revive=revive,
     )

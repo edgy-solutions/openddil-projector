@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from handlers import get_handler
+from persistence import Revive
 from handlers.base import (
     duration_to_seconds,
     parse_ns_timestamp,
@@ -828,3 +829,76 @@ def test_element_inventory_nested_provenance_labels_carried():
                                    "releasable_to": ["BDR"]})
     assert write.row["originator_nation"] == "ATL"
     assert write.row["releasable_to"] == ["BDR"]
+
+
+# -- telemetry_latest: a deactivated asset returns when it reappears ----------
+
+_KIN = {"position": {"ecef": {"x": {"value": 1.0, "unit": "m"}}}}
+_DIS_PROV = {"producer_id": "dis-ingestor-binary",
+             "source_protocol": "DIS/IEEE-1278.1-binary",
+             "sample_time": "2026-05-14T03:00:00Z"}
+
+
+def test_telemetry_latest_kinematics_without_claim_sets_revive():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1007"},
+        "kinematics": _KIN,
+        "operational_state": {"health_state": "HEALTH_STATE_NOMINAL"},
+        "provenance": _DIS_PROV,
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1007", decoded)
+    assert write.revive == Revive(
+        column="operational_status",
+        from_values=("deactivated",),
+        to_value="operational",
+        at_column="operational_status_at",
+        at_from="updated_at",
+    )
+    # the CASE must be the only assignment to these columns
+    assert "operational_status" not in write.row
+    assert "operational_status_at" not in write.row
+    assert "updated_at" in write.row
+
+
+def test_telemetry_latest_deactivated_claim_with_kinematics_has_no_revive():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1007"},
+        "kinematics": _KIN,
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_DEACTIVATED"},
+        "provenance": _DIS_PROV,
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1007", decoded)
+    assert write.revive is None
+    assert write.row["operational_status"] == "deactivated"
+
+
+def test_telemetry_latest_dis_destroyed_fallback_has_no_revive():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1005"},
+        "kinematics": _KIN,
+        "operational_state": {"health_state": "HEALTH_STATE_FAILED"},
+        "provenance": _DIS_PROV,
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1005", decoded)
+    assert write.revive is None
+    assert write.row["operational_status"] == "destroyed"
+
+
+def test_telemetry_latest_status_only_record_has_no_revive():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1007"},
+        "operational_state": {"operational_status": "OPERATIONAL_STATUS_DEACTIVATED"},
+        "provenance": _DIS_PROV,
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1007", decoded)
+    assert write.revive is None
+
+
+def test_telemetry_latest_no_kinematics_and_no_claim_has_no_revive():
+    decoded = {
+        "asset": {"asset_id": "dis:1:1:1007"},
+        "operational_state": {"health_state": "HEALTH_STATE_NOMINAL"},
+        "provenance": _DIS_PROV,
+    }
+    write = get_handler("telemetry_latest")("dis:1:1:1007", decoded)
+    assert write.revive is None

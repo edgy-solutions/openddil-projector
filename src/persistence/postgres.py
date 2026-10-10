@@ -32,6 +32,28 @@ log = logging.getLogger("projector.postgres")
 LIFECYCLE_TABLE = "telemetry_latest_state"
 
 
+@dataclass(frozen=True)
+class Revive:
+    """A conditional return from one status value to another, on upsert.
+
+    column      - the status column that may be rewritten
+    from_values - the only values of `column` that are rewritten; any other
+                  existing value is left exactly as it is
+    to_value    - what `column` becomes when it held one of `from_values`
+    at_column   - the timestamp column stamped when `column` is rewritten
+    at_from     - the `row` key whose value `at_column` takes on a rewrite
+
+    Everything is bound as a parameter, never interpolated. On INSERT (no
+    existing row) a Revive adds nothing: the column default already applies.
+    """
+
+    column: str
+    from_values: tuple[str, ...]
+    to_value: str
+    at_column: str
+    at_from: str
+
+
 @dataclass
 class Write:
     """What a handler wants persisted.
@@ -50,6 +72,11 @@ class Write:
     row       — column -> value. Values destined for jsonb columns are
                 plain Python lists/dicts; `jsonb_columns` says which.
     jsonb_columns — names in `row` that must be json.dumps'd before binding
+    revive    — upsert only: on conflict, move `revive.column` from one of
+                `revive.from_values` to `revive.to_value` (stamping
+                `revive.at_column` from the row's `revive.at_from`), else
+                leave both columns as they were. Neither column may also be
+                a key in `row`: the CASE must be their only assignment.
     """
 
     table: str
@@ -57,6 +84,7 @@ class Write:
     key_columns: list[str]
     row: dict[str, Any]
     jsonb_columns: set[str] = field(default_factory=set)
+    revive: Revive | None = None
 
 
 class PostgresPool:
@@ -109,6 +137,19 @@ class PostgresPool:
     def build_sql(write: Write) -> str:
         """Return the parameterised SQL for a Write. Pure — unit-testable."""
         cols = list(write.row.keys())
+        revive = write.revive
+        if revive is not None:
+            if write.mode != "upsert":
+                raise ValueError("Write.revive is only valid for mode 'upsert'")
+            if revive.column in write.row or revive.at_column in write.row:
+                raise ValueError(
+                    "Write.revive columns must not also be keys in row: "
+                    "the CASE must be their only assignment"
+                )
+            if revive.at_from not in write.row:
+                raise ValueError(
+                    f"Write.revive.at_from {revive.at_from!r} is not a key in row"
+                )
         placeholders = [f"${i + 1}" for i in range(len(cols))]
         col_list = ", ".join(f'"{c}"' for c in cols)
         val_list = ", ".join(placeholders)
@@ -150,6 +191,27 @@ class PostgresPool:
             for c in cols
             if c not in write.key_columns
         )
+        if revive is not None:
+            # from_values / to_value are bound after the row's own
+            # placeholders (see _bind_values), never interpolated. Both
+            # CASEs read the pre-update row (Postgres evaluates every SET
+            # expression against the old row), so the status test in the
+            # timestamp CASE still sees the old status and their order
+            # here does not matter.
+            n = len(cols)
+            in_params = ", ".join(
+                f"${n + 1 + i}" for i in range(len(revive.from_values))
+            )
+            to_param = f"${n + 1 + len(revive.from_values)}"
+            t, c, a = write.table, revive.column, revive.at_column
+            case = f'"{t}"."{c}" IN ({in_params})'
+            revive_sql = (
+                f'"{a}" = CASE WHEN {case} THEN EXCLUDED."{revive.at_from}" '
+                f'ELSE "{t}"."{a}" END, '
+                f'"{c}" = CASE WHEN {case} THEN {to_param} '
+                f'ELSE "{t}"."{c}" END'
+            )
+            updates = f"{updates}, {revive_sql}" if updates else revive_sql
         return (
             f'INSERT INTO "{write.table}" ({col_list}) '
             f"VALUES ({val_list}) "
@@ -164,6 +226,9 @@ class PostgresPool:
                 values.append(json.dumps(val))
             else:
                 values.append(val)
+        if write.revive is not None:
+            values.extend(write.revive.from_values)
+            values.append(write.revive.to_value)
         return values
 
     # -- execution ----------------------------------------------------------
