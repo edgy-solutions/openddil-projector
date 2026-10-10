@@ -6,7 +6,8 @@ the RED this file records.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -108,34 +109,40 @@ def test_stale_goes_down_strictly_after_threshold():
     assert t.reach(16.1) == "down"
 
 
-def test_restore_needs_two_arrivals_within_down_after():
-    t = lm.LinkTracker(D, start=0.0)
-    t.on_arrival(1.0)
+def test_restore_needs_three_fresh_arrivals_within_down_after():
+    t = lm.LinkTracker(D, start=0.0, restore_arrivals=3, fresh_max_age_s=D)
+    t.on_arrival(1.0, 0.5)
     assert t.reach(30.0) == "down"
-    t.on_arrival(31.0)                  # first arrival after a long gap
+    t.on_arrival(31.0, 0.5)             # first arrival after a long gap
     assert t.reach(31.5) == "down"
-    t.on_arrival(33.0)
-    assert t.reach(33.5) == "fresh"
+    t.on_arrival(33.0, 0.5)
+    assert t.reach(33.5) == "down"
+    t.on_arrival(35.0, 0.5)
+    assert t.reach(35.5) == "fresh"
 
 
 def test_restore_count_resets_on_wide_gap():
-    t = lm.LinkTracker(D, start=0.0)
-    t.on_arrival(1.0)
+    t = lm.LinkTracker(D, start=0.0, restore_arrivals=3, fresh_max_age_s=D)
+    t.on_arrival(1.0, 0.5)
     assert t.reach(30.0) == "down"
-    t.on_arrival(31.0)
-    t.on_arrival(50.0)                  # gap 19 > down_after: count restarts at 1
+    t.on_arrival(31.0, 0.5)
+    t.on_arrival(33.0, 0.5)
+    t.on_arrival(50.0, 0.5)             # gap 17 > down_after: count restarts at 1
     assert t.reach(50.5) == "down"
-    t.on_arrival(52.0)
-    assert t.reach(52.5) == "fresh"
+    t.on_arrival(52.0, 0.5)
+    assert t.reach(52.5) == "down"
+    t.on_arrival(54.0, 0.5)
+    assert t.reach(54.5) == "fresh"
 
 
-def test_never_seen_after_warmup_needs_two_arrivals():
-    t = lm.LinkTracker(D, start=0.0)
+def test_never_seen_after_warmup_needs_three_arrivals():
+    t = lm.LinkTracker(D, start=0.0, restore_arrivals=3, fresh_max_age_s=D)
     assert t.reach(20.0) == "down"
-    t.on_arrival(21.0)
-    assert t.reach(21.5) == "down"
-    t.on_arrival(23.0)
-    assert t.reach(23.5) == "fresh"
+    t.on_arrival(21.0, 0.5)
+    t.on_arrival(23.0, 0.5)
+    assert t.reach(23.5) == "down"
+    t.on_arrival(25.0, 0.5)
+    assert t.reach(25.5) == "fresh"
 
 
 def test_late_arrival_without_tick_still_needs_restore():
@@ -151,6 +158,101 @@ def test_declared_idle_cases():
     assert lm.classify("fresh", "ACTIVE", True) == "up"
     assert lm.classify("down", "ACTIVE", True) == "down"
     assert lm.classify("down", "IDLE", True) == "down"
+
+
+# -- restore hysteresis (freshness by emitted_at) --------------------------
+
+T0 = datetime(2026, 10, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class _Wall:
+    """Injectable wall clock, the counterpart of the monotonic `now`."""
+
+    def __init__(self) -> None:
+        self.t = T0
+
+    def __call__(self) -> datetime:
+        return self.t
+
+
+def _mon(wall):
+    return lm.LinkState(["e1"], [], D, 0.0, wall_clock=wall)
+
+
+def _hb(wall, age_s):
+    """A heartbeat emitted `age_s` before the wall clock now (negative = future)."""
+    return lh.encode_heartbeat("e1", wall.t - timedelta(seconds=age_s), "ACTIVE", 0)
+
+
+def _state(mon, now):
+    return mon.rows(now)[0].row["link_state"]
+
+
+def _down_monitor():
+    wall = _Wall()
+    mon = _mon(wall)
+    assert _state(mon, 20.0) == "down"      # never seen after warm-up
+    return mon, wall
+
+
+def test_backlog_burst_stays_down_then_fresh_restores():
+    mon, wall = _down_monitor()
+    for i, age in enumerate(range(60, 40, -2)):     # 10 heartbeats, 60..42 s old
+        mon.ingest(_hb(wall, age), 21.0 + i * 0.01)
+    assert _state(mon, 21.5) == "down"
+    mon.ingest(_hb(wall, 0.5), 22.0)
+    mon.ingest(_hb(wall, 0.5), 24.0)
+    assert _state(mon, 24.5) == "down"
+    mon.ingest(_hb(wall, 0.5), 26.0)
+    assert _state(mon, 26.5) == "up"
+
+
+def test_stale_between_fresh_resets_streak():
+    mon, wall = _down_monitor()
+    mon.ingest(_hb(wall, 0.5), 21.0)
+    mon.ingest(_hb(wall, 0.5), 23.0)
+    mon.ingest(_hb(wall, 50.0), 25.0)               # stale: streak back to 0
+    mon.ingest(_hb(wall, 0.5), 27.0)
+    mon.ingest(_hb(wall, 0.5), 29.0)
+    assert _state(mon, 29.5) == "down"
+    mon.ingest(_hb(wall, 0.5), 31.0)
+    assert _state(mon, 31.5) == "up"
+
+
+def test_clock_skew_tolerance_is_absolute():
+    mon, wall = _down_monitor()
+    for i in range(3):                              # child ahead by 5 s: fresh
+        mon.ingest(_hb(wall, -5.0), 21.0 + 2 * i)
+    assert _state(mon, 27.5) == "up"
+
+    mon, wall = _down_monitor()
+    for i in range(3):                              # child ahead by 20 s: not fresh
+        mon.ingest(_hb(wall, -20.0), 21.0 + 2 * i)
+    assert _state(mon, 27.5) == "down"
+
+
+def test_missing_emitted_at_restores_by_arrival_and_warns_once(caplog):
+    caplog.set_level(logging.WARNING, logger="projector.link_monitor")
+    mon, _ = _down_monitor()
+    raw = lh.encode_heartbeat("e1", datetime.fromtimestamp(0, timezone.utc), "ACTIVE", 0)
+    for i in range(3):
+        mon.ingest(raw, 21.0 + 2 * i)
+    assert _state(mon, 27.5) == "up"
+    warns = [r for r in caplog.records if "without emitted_at" in r.getMessage()]
+    assert len(warns) == 1
+
+
+def test_restore_logs_streak_max_age_and_skipped(caplog):
+    caplog.set_level(logging.INFO, logger="projector.link_monitor")
+    mon, wall = _down_monitor()
+    for i in range(4):
+        mon.ingest(_hb(wall, 60.0), 21.0 + i * 0.01)
+    for i, age in enumerate((0.5, 1.5, 1.0)):
+        mon.ingest(_hb(wall, age), 22.0 + 2 * i)
+    msgs = [r.getMessage() for r in caplog.records if "restored" in r.getMessage()]
+    assert len(msgs) == 1
+    assert "e1" in msgs[0] and "streak=3" in msgs[0]
+    assert "max_age_s=1.5" in msgs[0] and "stale_skipped=4" in msgs[0]
 
 
 # -- row builder -----------------------------------------------------------
