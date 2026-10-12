@@ -52,7 +52,11 @@ from metrics import (
     start_metrics_server,
 )
 from persistence import PostgresPool
-from persistence.postgres import PostgresWriteError
+from persistence.postgres import (
+    PostgresWriteError,
+    StoreNotConfigured,
+    store_dsn_from_env,
+)
 from reporting_sweep import reporting_sweep_loop
 
 logging.basicConfig(
@@ -62,10 +66,6 @@ logging.basicConfig(
 log = logging.getLogger("projector")
 
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "redpanda-edge:9092")
-POSTGRES_DSN = os.getenv(
-    "POSTGRES_DSN",
-    "postgres://postgres:password@postgres-hq:5432/openddil",
-)
 BATCH_MAX_MESSAGES = int(os.getenv("BATCH_MAX_MESSAGES", "500"))
 BATCH_MAX_WAIT_MS = int(os.getenv("BATCH_MAX_WAIT_MS", "200"))
 
@@ -429,8 +429,13 @@ async def main() -> None:
     port = start_metrics_server()
     log.info("metrics server on :%d", port)
 
+    try:
+        store_dsn = store_dsn_from_env()
+    except StoreNotConfigured as exc:
+        log.error("%s", exc)
+        sys.exit(2)
     pool = PostgresPool(
-        POSTGRES_DSN,
+        store_dsn,
         retry_base_seconds=config.settings.postgres_retry_base_seconds,
         retry_max_seconds=config.settings.postgres_retry_max_seconds,
     )

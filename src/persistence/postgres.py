@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,12 +88,45 @@ class Write:
     revive: Revive | None = None
 
 
+class StoreNotConfigured(RuntimeError):
+    """Neither POSTGRES_DSN nor the PG* environment names a store."""
+
+
+def store_dsn_from_env() -> str | None:
+    """Resolve the store connection source.
+
+    Returns the DSN when POSTGRES_DSN is set and non-empty (docker compose
+    fallback). Returns None when the standard PG* environment (PGHOST
+    non-empty) is the source: asyncpg reads PGHOST/PGPORT/PGDATABASE/
+    PGUSER/PGPASSWORD/PGSSLMODE itself when called with no DSN, so the
+    password never passes through a string built here. Raises
+    StoreNotConfigured when neither is set. Logs the source, never a value
+    of the DSN or the password.
+    """
+    dsn = os.getenv("POSTGRES_DSN", "")
+    if dsn:
+        log.info("store connection: POSTGRES_DSN (compose fallback)")
+        return dsn
+    host = os.getenv("PGHOST", "")
+    if host:
+        log.info(
+            "store connection: PG* environment (host=%s db=%s user=%s)",
+            host, os.getenv("PGDATABASE", ""), os.getenv("PGUSER", ""),
+        )
+        return None
+    raise StoreNotConfigured(
+        "store connection not configured: set PGHOST (with PGDATABASE, "
+        "PGUSER and PGPASSWORD or PGPASSFILE) or, for docker compose, "
+        "POSTGRES_DSN"
+    )
+
+
 class PostgresPool:
     """Owns the asyncpg pool and executes Writes with retry."""
 
     def __init__(
         self,
-        dsn: str,
+        dsn: str | None,
         *,
         retry_base_seconds: float = 0.5,
         retry_max_seconds: float = 30.0,
