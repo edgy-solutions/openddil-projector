@@ -154,7 +154,7 @@ def test_telemetry_latest_flattens_identity_keeps_blobs():
         "kinematics": {"position": {"ecef": {"x": {"value": 1.0, "unit": "m"}}}},
         "sustainment": {"thermal": {"component_temperature":
                                     {"value": 92.0, "unit": "Cel"}}},
-        "provenance": {"producer_id": "vrforces-01",
+        "provenance": {"producer_id": "dis-sim-01",
                        "source_protocol": "DIS/IEEE-1278.1",
                        "sample_time": "2026-05-14T03:00:00Z"},
         "schema_revision": 1,
@@ -201,7 +201,7 @@ def test_telemetry_latest_undeclared_subsystem_is_null():
 def test_telemetry_latest_extracts_operational_state():
     """Phase 5: when EntityTelemetryEvent carries operational_state (the
     customer-overlay sensor branch is the first producer; future DIS / AFSim /
-    VRForces adapters too), the 3 enum axes + 2 activity booleans land
+    co-located simulator adapters too), the 3 enum axes + 2 activity booleans land
     in their own columns for direct SQL filtering and SPA rendering."""
     decoded = {
         "asset": {

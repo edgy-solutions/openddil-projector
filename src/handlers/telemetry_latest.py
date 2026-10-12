@@ -85,7 +85,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
 
     # Phase 5: operational_state 3-axis breakout. Producers that emit the
     # field (customer-overlay sensor branch via subsystem_state decomposition;
-    # future DIS / AFSim / VRForces adapters) populate this block;
+    # future DIS / AFSim / co-located simulator adapters) populate this block;
     # producers that don't (legacy Unit telemetry, capability-only assets)
     # leave it absent — read as `None` so postgres stores NULL and the
     # SPA's GROUND DIAGNOSTICS panel renders "—" for each axis.
