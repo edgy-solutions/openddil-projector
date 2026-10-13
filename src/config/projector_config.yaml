@@ -90,12 +90,29 @@ mappings:
   # select this table: its mode filter only matches
   # "append"+retention_hours or "upsert"+asset_ttl_hours, and "custom"
   # matches neither.)
+  #
+  # The same mapping now also writes effector_resupply (one row per
+  # Resupply Received munition type). Like effector_launch it must never be
+  # pruned: a pruned resupply makes a replayed `remaining` wrong. Mode custom
+  # keeps both tables out of build_prune_targets.
   - topic: effector-events
     handler: effector_launch
     table: effector_launch
     consumer_group: projector-effector-launch
     decode_as: json
     mode: custom
+
+  # Spare-parts availability stand-in. HQ only: logistics-sim publishes it to
+  # the HQ broker and it is never forwarded, so per-edge projectors do not
+  # need this mapping (same note as the regional rollups). Deliberately no
+  # asset_ttl_hours: the table is keyed by site + part, not asset, and a 60 s
+  # sweep refreshes every row.
+  - topic: parts-availability
+    handler: parts_availability
+    table: parts_availability
+    consumer_group: projector-parts-availability
+    decode_as: json
+    mode: upsert
 
   - topic: asset-telemetry-windows
     handler: telemetry_windows

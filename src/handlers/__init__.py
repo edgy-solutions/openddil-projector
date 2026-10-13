@@ -19,6 +19,7 @@ from . import (
     cm_state,
     effector_launch,
     logistics_status,
+    parts_availability,
     region_fleet_summary,
     region_top_factors,
     region_wear_trends,
@@ -45,6 +46,8 @@ _REGISTRY: dict[str, Handler] = {
     # 2026-06-30: per-asset per-layer inventory aggregate (sim emits
     # alongside the per-element snapshot; drives maintainer Inventory card).
     "asset_element_inventory": asset_element_inventory.handle,
+    # HQ spare-parts stand-in (keyed by site + part, not asset).
+    "parts_availability": parts_availability.handle,
     # mode "custom" — owns its own Postgres I/O; see module docstring above.
     "effector_launch": effector_launch.handle,
 }

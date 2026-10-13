@@ -277,27 +277,109 @@ def test_effector_launcher_counts_view_coalesces_asset_before_variant():
     assert '"dl_variant"."key_kind" = \'variant\'' in sql
 
 
-# -- resupply_received: not a launch, not a refusal -----------------------------
+# -- resupply_received: stored rows, one per munition type ---------------------
 
-async def test_resupply_writes_nothing_and_is_not_a_refusal():
-    from handlers import base
-    pool = _FakePool(admitted=True)
-    record = {
+_MT_A = {"kind": 2, "domain": 9, "country": 225, "category": 2,
+         "subcategory": 1, "specific": 1, "extra": 0}
+_MT_B = {**_MT_A, "specific": 2}
+
+
+def _resupply(**over):
+    rec = {
         "pdu_type": "resupply_received",
-        "event_urn": "dis-resupply:1:58:1001:7",
+        "event_urn": "dis-event:1:58:7",
         "launcher_urn": "dis:1:58:1001",
-        "supplier_urn": None,
-        "supplies": [{"munition_type": {"kind": 2, "domain": 9, "country": 225,
-                                        "category": 2, "subcategory": 1,
-                                        "specific": 1, "extra": 0},
-                      "quantity": 4}],
+        "supplier_urn": "dis:1:58:3001",
+        "supplies": [{"munition_type": _MT_A, "quantity": 4},
+                     {"munition_type": _MT_B, "quantity": 6}],
+        "ingest_timestamp": "2026-10-06T00:00:20Z",
+        "provenance": {"edge_id": "edge-01", "region_id": "region-01",
+                       "originator_nation": "AAA", "releasable_to": []},
     }
-    refused_before = dict(base._refused)
-    seen_before = metrics.EFFECTOR_RESUPPLY_SEEN._value.get()
+    rec.update(over)
+    return rec
 
-    await effector_launch.handle("dis:1:58:1001", record, pool)
 
+async def test_resupply_two_types_two_append_writes():
+    pool = _FakePool(admitted=True)
+    seen = metrics.EFFECTOR_RESUPPLY_SEEN._value.get()
+    rows = metrics.EFFECTOR_RESUPPLY_ROWS._value.get()
+    await effector_launch.handle("k", _resupply(), pool)
+    assert len(pool.executed) == 2
+    for w in pool.executed:
+        assert w.table == "effector_resupply"
+        assert w.mode == "append"
+        assert w.key_columns == ["event_urn", "munition_type"]
+    by_type = {w.row["munition_type"]: w.row for w in pool.executed}
+    assert set(by_type) == {"2.9.225.2.1.1.0", "2.9.225.2.1.2.0"}
+    r = by_type["2.9.225.2.1.1.0"]
+    assert r["event_urn"] == "dis-event:1:58:7"
+    assert r["launcher_asset_id"] == "dis:1:58:1001"
+    assert r["supplier_asset_id"] == "dis:1:58:3001"
+    assert r["quantity"] == 4
+    assert by_type["2.9.225.2.1.2.0"]["quantity"] == 6
+    assert r["received_at"].isoformat().startswith("2026-10-06T00:00:20")
+    assert r["edge_id"] == "edge-01" and r["region_id"] == "region-01"
+    assert r["originator_nation"] == "AAA" and r["releasable_to"] == []
+    assert metrics.EFFECTOR_RESUPPLY_SEEN._value.get() == seen + 1
+    assert metrics.EFFECTOR_RESUPPLY_ROWS._value.get() == rows + 2
+
+
+async def test_resupply_duplicate_type_lines_are_summed():
+    pool = _FakePool(admitted=True)
+    supplies = [{"munition_type": _MT_A, "quantity": 3},
+                {"munition_type": _MT_A, "quantity": 5}]
+    await effector_launch.handle("k", _resupply(supplies=supplies), pool)
+    assert len(pool.executed) == 1
+    assert pool.executed[0].row["quantity"] == 8
+
+
+async def test_resupply_bad_quantity_line_refused_other_written():
+    pool = _FakePool(admitted=True)
+    supplies = [{"munition_type": _MT_A, "quantity": -1},
+                {"munition_type": _MT_B, "quantity": 2},
+                {"munition_type": _MT_A},
+                {"munition_type": _MT_A, "quantity": True}]
+    await effector_launch.handle("k", _resupply(supplies=supplies), pool)
+    assert len(pool.executed) == 1
+    assert pool.executed[0].row["munition_type"] == "2.9.225.2.1.2.0"
+    assert pool.executed[0].row["quantity"] == 2
+
+
+async def test_resupply_unknown_launcher_refused():
+    pool = _FakePool(admitted=False)
+    before = metrics.EFFECTOR_REFUSED.labels(reason="unknown_launcher")._value.get()
+    seen = metrics.EFFECTOR_RESUPPLY_SEEN._value.get()
+    await effector_launch.handle("k", _resupply(), pool)
     assert pool.executed == []
-    assert pool.detonation_calls == []
-    assert base._refused == refused_before
-    assert metrics.EFFECTOR_RESUPPLY_SEEN._value.get() == seen_before + 1
+    assert metrics.EFFECTOR_REFUSED.labels(reason="unknown_launcher")._value.get() == before + 1
+    assert metrics.EFFECTOR_RESUPPLY_SEEN._value.get() == seen + 1
+
+
+@pytest.mark.parametrize("supplies", [[], None, "x"])
+async def test_resupply_missing_supplies_writes_nothing(supplies):
+    pool = _FakePool(admitted=True)
+    rec = _resupply()
+    if supplies is None:
+        del rec["supplies"]
+    else:
+        rec["supplies"] = supplies
+    await effector_launch.handle("k", rec, pool)
+    assert pool.executed == []
+
+
+async def test_resupply_missing_keys_writes_nothing():
+    pool = _FakePool(admitted=True)
+    await effector_launch.handle("k", _resupply(event_urn=None), pool)
+    await effector_launch.handle("k", _resupply(launcher_urn=""), pool)
+    assert pool.executed == []
+
+
+async def test_resupply_without_labels_has_no_label_keys():
+    pool = _FakePool(admitted=True)
+    await effector_launch.handle(
+        "k", _resupply(provenance={"edge_id": "e", "region_id": "r"}), pool)
+    assert len(pool.executed) == 2
+    for w in pool.executed:
+        assert "originator_nation" not in w.row
+        assert "releasable_to" not in w.row
