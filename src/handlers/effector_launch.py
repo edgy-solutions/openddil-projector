@@ -196,6 +196,11 @@ async def _handle_resupply(decoded: dict[str, Any], pool: PostgresPool) -> None:
     totals: dict[str, int] = {}
     for line in supplies:
         qty = line.get("quantity") if isinstance(line, dict) else None
+        # The DIS supply quantity is a float32 on the wire, so a whole count
+        # arrives as 1.0. Whole-number floats are counts; a fractional one is
+        # refused here (fusion would truncate it), never rounded silently.
+        if isinstance(qty, float) and qty.is_integer():
+            qty = int(qty)
         if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
             refuse_row("effector_resupply", "bad_quantity",
                        f"resupply {event_urn} line quantity={qty!r}")

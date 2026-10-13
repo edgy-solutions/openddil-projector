@@ -346,6 +346,18 @@ async def test_resupply_bad_quantity_line_refused_other_written():
     assert pool.executed[0].row["quantity"] == 2
 
 
+async def test_resupply_whole_float_quantity_is_a_count():
+    # The wire carries float32: 1.0 is one round; 1.5 is refused, not rounded.
+    pool = _FakePool(admitted=True)
+    supplies = [{"munition_type": _MT_A, "quantity": 1.0},
+                {"munition_type": _MT_A, "quantity": 2.0},
+                {"munition_type": _MT_B, "quantity": 1.5}]
+    await effector_launch.handle("k", _resupply(supplies=supplies), pool)
+    assert len(pool.executed) == 1
+    assert pool.executed[0].row["quantity"] == 3
+    assert isinstance(pool.executed[0].row["quantity"], int)
+
+
 async def test_resupply_unknown_launcher_refused():
     pool = _FakePool(admitted=False)
     before = metrics.EFFECTOR_REFUSED.labels(reason="unknown_launcher")._value.get()
