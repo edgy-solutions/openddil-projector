@@ -127,6 +127,31 @@ mappings:
     decode_as: json
     mode: upsert
 
+  # ADR-0050 declare-and-expect. asset-declarations feeds two tables (per-asset
+  # declaration, per-serial correlation), each with its own consumer group;
+  # asset-fielding is the expected-arrival list. Deliberately no
+  # asset_ttl_hours: these are records of intent, never pruned.
+  - topic: asset-declarations
+    handler: asset_declaration
+    table: asset_declaration
+    consumer_group: projector-asset-declaration
+    decode_as: json
+    mode: upsert
+
+  - topic: asset-declarations
+    handler: asset_correlation
+    table: asset_correlation
+    consumer_group: projector-asset-correlation
+    decode_as: json
+    mode: upsert
+
+  - topic: asset-fielding
+    handler: asset_fielding
+    table: asset_fielding
+    consumer_group: projector-asset-fielding
+    decode_as: json
+    mode: upsert
+
   - topic: asset-telemetry-windows
     handler: telemetry_windows
     table: asset_telemetry_windows

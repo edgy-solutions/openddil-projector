@@ -13,6 +13,9 @@ name; only the CALLING convention differs, at the one call site in main.py.
 from __future__ import annotations
 
 from . import (
+    asset_correlation,
+    asset_declaration,
+    asset_fielding,
     asset_element_inventory,
     asset_element_telemetry,
     capability_state,
@@ -53,6 +56,10 @@ _REGISTRY: dict[str, Handler] = {
     "effector_launch": effector_launch.handle,
     # mode "custom" — in-flight munition tracks (ADR-0049); see its docstring.
     "munition_track": munition_track.handle,
+    # ADR-0050 declare-and-expect; pure upserts, never pruned.
+    "asset_declaration": asset_declaration.handle,
+    "asset_correlation": asset_correlation.handle,
+    "asset_fielding": asset_fielding.handle,
 }
 
 
