@@ -30,9 +30,11 @@ def _decl(**over):
 def _field(**over):
     rec = {
         "serial": "SN-0001", "platform_variant": "variant-x", "unit": "unit-a",
-        "owning_nation": "AAA", "releasable_to": ["BBB"],
-        "fielded_to": "edge-01", "region_id": None,
-        "due_by": "2026-11-01T00:00:00Z", "recorded_at": "2026-10-15T12:00:00Z",
+        "site": "edge-01",
+        "due_by_ns": 1793491200000000000,       # 2026-11-01T00:00:00Z
+        "observed_at_ns": 1792065600000000000,  # 2026-10-15T12:00:00Z
+        "provenance": {"originator_nation": "AAA", "releasable_to": ["BBB"]},
+        "extraction": {"cursor": "sweep-1", "extracted_at_ns": 1792065600000000000},
     }
     rec.update(over)
     return rec
@@ -117,16 +119,33 @@ def test_correlation_missing_required_is_skipped():
 
 # -- asset_fielding ----------------------------------------------------------
 
-def test_fielding_good_record_maps_owning_nation():
+def test_fielding_good_record_maps_wire_shape():
     w = asset_fielding.handle("SN-0001", _field())
     assert isinstance(w, Write)
     assert (w.table, w.mode, w.key_columns) == (
         "asset_fielding", "upsert", ["serial"])
     r = w.row
-    assert r["originator_nation"] == "AAA"
-    assert "owning_nation" not in r
+    assert r["originator_nation"] == "AAA" and r["releasable_to"] == ["BBB"]
     assert r["fielded_to"] == "edge-01" and r["region_id"] is None
+    assert "site" not in r and "extraction" not in r
     assert r["due_by"] == datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert r["recorded_at"] == datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
+
+
+def test_fielding_empty_releasable_is_stored_empty():
+    w = asset_fielding.handle("k", _field(
+        provenance={"originator_nation": "AAA", "releasable_to": []}))
+    assert w.row["releasable_to"] == []
+
+
+def test_fielding_old_flat_shape_is_refused():
+    flat = {
+        "serial": "SN-0001", "platform_variant": "variant-x", "unit": "unit-a",
+        "owning_nation": "AAA", "releasable_to": ["BBB"],
+        "fielded_to": "edge-01", "region_id": None,
+        "due_by": "2026-11-01T00:00:00Z", "recorded_at": "2026-10-15T12:00:00Z",
+    }
+    assert asset_fielding.handle("k", flat) is None
 
 
 @pytest.mark.parametrize("val", [None, "", "none"])
@@ -135,12 +154,27 @@ def test_fielding_no_serial_is_skipped(val):
 
 
 @pytest.mark.parametrize("field", [
-    "platform_variant", "unit", "owning_nation", "fielded_to", "due_by",
-    "recorded_at"])
+    "platform_variant", "unit", "site", "due_by_ns", "observed_at_ns",
+    "provenance"])
 def test_fielding_missing_required_is_skipped(field):
     rec = _field()
     del rec[field]
     assert asset_fielding.handle("k", rec) is None
+
+
+def test_fielding_no_originator_nation_is_skipped():
+    assert asset_fielding.handle("k", _field(
+        provenance={"releasable_to": []})) is None
+
+
+def test_fielding_bad_releasable_to_is_skipped():
+    assert asset_fielding.handle("k", _field(
+        provenance={"originator_nation": "AAA", "releasable_to": "BBB"})) is None
+
+
+@pytest.mark.parametrize("val", [0, "soon", None])
+def test_fielding_bad_timestamp_is_skipped(val):
+    assert asset_fielding.handle("k", _field(due_by_ns=val)) is None
 
 
 # -- config ------------------------------------------------------------------
