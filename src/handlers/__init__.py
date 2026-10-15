@@ -19,6 +19,7 @@ from . import (
     cm_state,
     effector_launch,
     logistics_status,
+    munition_track,
     parts_availability,
     region_fleet_summary,
     region_top_factors,
@@ -50,6 +51,8 @@ _REGISTRY: dict[str, Handler] = {
     "parts_availability": parts_availability.handle,
     # mode "custom" — owns its own Postgres I/O; see module docstring above.
     "effector_launch": effector_launch.handle,
+    # mode "custom" — in-flight munition tracks (ADR-0049); see its docstring.
+    "munition_track": munition_track.handle,
 }
 
 

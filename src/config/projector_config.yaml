@@ -102,6 +102,19 @@ mappings:
     decode_as: json
     mode: custom
 
+  # In-flight munition tracks (ADR-0049), keyed by the munition's own DIS id.
+  # Like effector_launch: deliberately NO retention_hours and NO
+  # asset_ttl_hours -- the row is the track's whole history (first seen,
+  # terminal state, late_terminal) and nothing may age it out. Mode custom
+  # keeps it out of build_prune_targets. The handler also joins the launcher
+  # from effector_launch, so it reads that table.
+  - topic: munition-tracks
+    handler: munition_track
+    table: munition_track
+    consumer_group: projector-munition-track
+    decode_as: json
+    mode: custom
+
   # Spare-parts availability stand-in. HQ only: logistics-sim publishes it to
   # the HQ broker and it is never forwarded, so per-edge projectors do not
   # need this mapping (same note as the regional rollups). Deliberately no

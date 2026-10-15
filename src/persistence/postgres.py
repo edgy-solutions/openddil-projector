@@ -530,6 +530,217 @@ class PostgresPool:
         except (ValueError, IndexError):  # pragma: no cover
             return 0
 
+    # -- munition_track (ADR-0049) ------------------------------------------
+    # `silent` below is a track state on this tier's own arrival clock
+    # (last_heard_at), never a launch outcome; effector_launch.terminal_state
+    # is not written by anything in this block (it is only read, to join).
+
+    async def upsert_munition_track(
+        self,
+        *,
+        munition_asset_id: str,
+        munition_type: str,
+        ecef: tuple[float, float, float],
+        sample_time: Any,
+        edge_id: str,
+        region_id: str,
+        now: Any,
+    ) -> tuple[str, bool]:
+        """Insert or advance one munition's track. Returns (outcome, joined):
+
+          "inserted"       -- no row existed. The launcher, event and labels
+                              are copied from the newest effector_launch row
+                              naming this munition (joined=True), else left
+                              NULL with edge/region from the record.
+          "updated"        -- non-terminal row; last_heard_at set, and ECEF /
+                              last_sample_at advanced because the sample is
+                              newer.
+          "stale"          -- non-terminal row, sample not newer; only
+                              last_heard_at touched (the track is still alive).
+          "after_terminal" -- row already terminal; nothing written.
+        """
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.upsert_munition_track before connect()")
+        x, y, z = ecef
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for _ in range(2):
+                    row = await conn.fetchrow(
+                        'SELECT "terminal_state", "last_sample_at" '
+                        'FROM "munition_track" WHERE "munition_asset_id" = $1 '
+                        'FOR UPDATE',
+                        munition_asset_id,
+                    )
+                    if row is not None:
+                        break
+                    launch = await conn.fetchrow(
+                        'SELECT "launcher_asset_id", "event_urn", "edge_id", '
+                        '"region_id", "originator_nation", "releasable_to" '
+                        'FROM "effector_launch" WHERE "munition_asset_id" = $1 '
+                        'ORDER BY "launched_at" DESC LIMIT 1',
+                        munition_asset_id,
+                    )
+                    inserted = await conn.execute(
+                        'INSERT INTO "munition_track" ("munition_asset_id", '
+                        '"launcher_asset_id", "event_urn", "munition_type", '
+                        '"ecef_x", "ecef_y", "ecef_z", "first_seen_at", '
+                        '"last_sample_at", "last_heard_at", "edge_id", '
+                        '"region_id", "originator_nation", "releasable_to", '
+                        '"updated_at") '
+                        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, '
+                        '$11, $12, $13, $9) '
+                        'ON CONFLICT ("munition_asset_id") DO NOTHING',
+                        munition_asset_id,
+                        launch["launcher_asset_id"] if launch else None,
+                        launch["event_urn"] if launch else None,
+                        munition_type, x, y, z, sample_time, now,
+                        (launch["edge_id"] if launch else None) or edge_id,
+                        (launch["region_id"] if launch else None) or region_id,
+                        launch["originator_nation"] if launch else None,
+                        launch["releasable_to"] if launch else None,
+                    )
+                    if inserted.endswith(" 1"):
+                        return "inserted", launch is not None
+                    # Lost an insert race; re-select the winner and advance it.
+                else:  # pragma: no cover
+                    return "stale", False
+                if row["terminal_state"] is not None:
+                    return "after_terminal", False
+                if sample_time > row["last_sample_at"]:
+                    await conn.execute(
+                        'UPDATE "munition_track" SET "ecef_x" = $2, "ecef_y" = $3, '
+                        '"ecef_z" = $4, "last_sample_at" = $5, '
+                        '"last_heard_at" = $6, "updated_at" = $6 '
+                        'WHERE "munition_asset_id" = $1',
+                        munition_asset_id, x, y, z, sample_time, now,
+                    )
+                    return "updated", False
+                await conn.execute(
+                    'UPDATE "munition_track" SET "last_heard_at" = $2, '
+                    '"updated_at" = $2 WHERE "munition_asset_id" = $1',
+                    munition_asset_id, now,
+                )
+                return "stale", False
+
+    async def join_munition_track_launcher(
+        self,
+        *,
+        munition_asset_id: str,
+        launcher_asset_id: str,
+        event_urn: str,
+        edge_id: str | None,
+        region_id: str | None,
+        originator_nation: str | None,
+        releasable_to: list[str] | None,
+        now: Any,
+    ) -> int:
+        """Fire arrived after its track: give the track its launcher, event
+        and the launcher's labels. Only rows still without a launcher are
+        touched, so a later Fire cannot re-home a joined track. Returns rows
+        touched."""
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.join_munition_track_launcher before connect()"
+            )
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                'UPDATE "munition_track" SET "launcher_asset_id" = $2, '
+                '"event_urn" = $3, "edge_id" = COALESCE($4, "edge_id"), '
+                '"region_id" = COALESCE($5, "region_id"), '
+                '"originator_nation" = $6, "releasable_to" = $7, '
+                '"updated_at" = $8 '
+                'WHERE "munition_asset_id" = $1 AND "launcher_asset_id" IS NULL',
+                munition_asset_id, launcher_asset_id, event_urn, edge_id,
+                region_id, originator_nation, releasable_to, now,
+            )
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):  # pragma: no cover
+            return 0
+
+    async def terminate_munition_track(
+        self,
+        *,
+        munition_asset_id: str | None,
+        event_urn: str,
+        terminal_state: str,
+        detonation_result: int,
+        terminated_at: Any,
+        now: Any,
+    ) -> str:
+        """Terminate a track from a Detonation. The key is the record's own
+        munition id, else the munition_asset_id of the effector_launch row for
+        `event_urn`. Returns:
+
+          "terminated" -- an in-flight track now carries the result.
+          "late"       -- the track was 'silent'; the real result replaces it
+                          and late_terminal is set (a termination event
+                          outranks a silence inference).
+          "replayed"   -- already terminal with a real result; nothing written.
+          "skipped"    -- no key, or no track row for it.
+        """
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.terminate_munition_track before connect()"
+            )
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                key = munition_asset_id or await conn.fetchval(
+                    'SELECT "munition_asset_id" FROM "effector_launch" '
+                    'WHERE "event_urn" = $1',
+                    event_urn,
+                )
+                if not key:
+                    return "skipped"
+                row = await conn.fetchrow(
+                    'SELECT "terminal_state" FROM "munition_track" '
+                    'WHERE "munition_asset_id" = $1 FOR UPDATE',
+                    key,
+                )
+                if row is None:
+                    return "skipped"
+                old_state = row["terminal_state"]
+                if old_state is not None and old_state != "silent":
+                    return "replayed"
+                late = old_state == "silent"
+                await conn.execute(
+                    'UPDATE "munition_track" SET "terminal_state" = $2, '
+                    '"detonation_result" = $3, "terminated_at" = $4, '
+                    '"late_terminal" = $5, "updated_at" = $6 '
+                    'WHERE "munition_asset_id" = $1',
+                    key, terminal_state, detonation_result, terminated_at,
+                    late, now,
+                )
+                return "late" if late else "terminated"
+
+    @staticmethod
+    def build_munition_track_silence_sweep_sql() -> str:
+        """UPDATE, never DELETE. $1 = this reader's own now, $2 = the silence
+        window in seconds. Reads only last_heard_at (this tier's arrival
+        clock) and only in-flight rows; never touches effector_launch."""
+        return (
+            'UPDATE "munition_track" SET '
+            '"terminal_state" = \'silent\', "terminated_at" = $1, '
+            '"updated_at" = $1 '
+            'WHERE "terminal_state" IS NULL '
+            'AND "last_heard_at" < $1::timestamptz - ($2 || \' seconds\')::interval'
+        )
+
+    async def sweep_munition_track_silence(self, *, silence_s: float, now: Any) -> int:
+        """Mark in-flight tracks quiet past `silence_s` as 'silent'. Returns
+        rows touched."""
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.sweep_munition_track_silence before connect()"
+            )
+        sql = self.build_munition_track_silence_sweep_sql()
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, now, str(silence_s))
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):  # pragma: no cover
+            return 0
+
     async def replace_effector_declared_load(
         self, rows: list[tuple[str, str, str, int]]
     ) -> None:

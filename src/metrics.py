@@ -89,6 +89,41 @@ EFFECTOR_RESUPPLY_ROWS = Counter(
 for _reason in ("unknown_launcher", "no_fire", "conflicting_detonation"):
     EFFECTOR_REFUSED.labels(reason=_reason)
 
+# -- munition_track (in-flight munition tracks, ADR-0049) ---------------------
+# Unprefixed for the same reason as the EFFECTOR_* names above. `silent` is a
+# track state on this tier's own arrival clock, never a launch outcome
+# (ADR-0048 section 4 is untouched).
+MUNITION_TRACK_REFUSED = Counter(
+    "munition_track_refused_total",
+    "munition-tracks records this handler declined to write",
+    ["reason"],
+)
+MUNITION_TRACK_UPSERTS = Counter(
+    "munition_track_upserts_total",
+    "munition_track sample upserts, by outcome",
+    ["outcome"],
+)
+MUNITION_TRACK_JOINED = Counter(
+    "munition_track_joined_total",
+    "munition_track rows given a launcher, by which side arrived second",
+    ["via"],
+)
+MUNITION_TRACK_TERMINAL = Counter(
+    "munition_track_terminal_total",
+    "munition_track rows terminated by a Detonation, by terminal state",
+    ["state"],
+)
+MUNITION_TRACK_SILENT = Counter(
+    "munition_track_silent_total",
+    "munition_track rows the silence sweep marked silent",
+)
+for _reason in ("no_munition_urn", "no_location", "bad_sample_time"):
+    MUNITION_TRACK_REFUSED.labels(reason=_reason)
+for _outcome in ("inserted", "updated", "stale", "after_terminal"):
+    MUNITION_TRACK_UPSERTS.labels(outcome=_outcome)
+for _via in ("fire", "track"):
+    MUNITION_TRACK_JOINED.labels(via=_via)
+
 # -- link heartbeat / link_monitor --------------------------------------------
 LINK_HEARTBEATS_PRODUCED = Counter(
     "projector_link_heartbeats_produced_total",

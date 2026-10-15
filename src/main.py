@@ -39,6 +39,7 @@ from decoders import (
 from edge_buffer_monitor import edge_buffer_loop
 from effector_declared_load import DeclaredLoadConfigError, load_declared_load
 from effector_sweep import effector_sweep_loop
+from munition_track_sweep import munition_track_sweep_loop
 from handlers import get_handler
 from link_monitor import link_monitor_enabled, link_monitor_loop
 from metrics import (
@@ -499,6 +500,9 @@ async def main() -> None:
     # on its own clock/interval; a no-op where this instance's Postgres has
     # no in-flight effector_launch rows past the timeout.
     tasks.append(asyncio.create_task(effector_sweep_loop(pool)))
+    # munition_track silence sweep (ADR-0049). Unconditional, like the sweeps
+    # above: it reads only this instance's own arrival clock.
+    tasks.append(asyncio.create_task(munition_track_sweep_loop(pool)))
     # Phase 4c.5: edge->HQ DDIL link/buffer monitor.
     # ADR-0023 Phase 6a: with 3 projector instances (one per edge cluster),
     # only one should run the buffer monitor — they all write to the same

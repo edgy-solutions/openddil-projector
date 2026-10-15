@@ -40,7 +40,8 @@ import logging
 from typing import Any
 
 from metrics import (EFFECTOR_LATE_TERMINAL, EFFECTOR_REFUSED, EFFECTOR_REPLAYED,
-                     EFFECTOR_RESUPPLY_ROWS, EFFECTOR_RESUPPLY_SEEN)
+                     EFFECTOR_RESUPPLY_ROWS, EFFECTOR_RESUPPLY_SEEN,
+                     MUNITION_TRACK_JOINED, MUNITION_TRACK_TERMINAL)
 from persistence import PostgresPool, Write
 
 from .base import (now_utc, parse_timestamp, refuse_row, releasability_from,
@@ -127,6 +128,21 @@ async def _handle_fire(decoded: dict[str, Any], pool: PostgresPool) -> None:
     }
     write = Write(table=TABLE, mode="append", key_columns=["event_urn"], row=row)
     await pool.execute(write)
+    # The munition's track may have arrived first (ADR-0049); give it its
+    # launcher and labels. Nothing to join when the Fire names no munition.
+    if row["munition_asset_id"]:
+        joined = await pool.join_munition_track_launcher(
+            munition_asset_id=row["munition_asset_id"],
+            launcher_asset_id=launcher_urn,
+            event_urn=event_urn,
+            edge_id=row.get("edge_id"),
+            region_id=row.get("region_id"),
+            originator_nation=row.get("originator_nation"),
+            releasable_to=row.get("releasable_to"),
+            now=now_utc(),
+        )
+        if joined:
+            MUNITION_TRACK_JOINED.labels(via="fire").inc()
 
 
 async def _handle_detonation(decoded: dict[str, Any], pool: PostgresPool) -> None:
@@ -164,6 +180,25 @@ async def _handle_detonation(decoded: dict[str, Any], pool: PostgresPool) -> Non
         log.info("Detonation %s resolved a row the timeout sweep had already "
                   "marked unresolved (late_terminal)", event_urn)
     # "updated" is the normal case -- nothing to count beyond the write itself.
+
+    # The munition's track terminates whatever the effector_launch outcome
+    # was (ADR-0049): the track is keyed by the munition, and the Fire row
+    # may be absent or already terminal. Key: the record's own munition_urn,
+    # else the munition of this event's Fire row (resolved in the pool).
+    track = await pool.terminate_munition_track(
+        munition_asset_id=decoded.get("munition_urn"),
+        event_urn=event_urn,
+        terminal_state=terminal_state,
+        detonation_result=new_result,
+        terminated_at=terminated_at,
+        now=now_utc(),
+    )
+    if track in ("terminated", "late"):
+        MUNITION_TRACK_TERMINAL.labels(state=terminal_state).inc()
+        if track == "late":
+            log.info("Detonation %s resolved a munition track the silence "
+                      "sweep had already marked silent (late_terminal)",
+                      event_urn)
 
 
 async def _handle_resupply(decoded: dict[str, Any], pool: PostgresPool) -> None:

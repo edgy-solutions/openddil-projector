@@ -89,6 +89,14 @@ class _FakePool:
         self.detonation_calls.append(kwargs)
         return self._detonation_outcome, self._detonation_old_result
 
+    # The munition-track side (ADR-0049) is covered in test_munition_track.py;
+    # here the pool only has to accept the calls.
+    async def join_munition_track_launcher(self, **kwargs):
+        return 0
+
+    async def terminate_munition_track(self, **kwargs):
+        return "skipped"
+
 
 def _fire(event_urn="dis-event:1:58:1", launcher_urn="dis:1:58:1001"):
     return {
