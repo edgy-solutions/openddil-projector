@@ -130,6 +130,8 @@ async def _handle_fire(decoded: dict[str, Any], pool: PostgresPool) -> None:
     await pool.execute(write)
     # The munition's track may have arrived first (ADR-0049); give it its
     # launcher and labels. Nothing to join when the Fire names no munition.
+    # This can miss if the track's insert commits concurrently; the track's
+    # next write or the sweep heals it (PostgresPool.heal_munition_track_launchers).
     if row["munition_asset_id"]:
         joined = await pool.join_munition_track_launcher(
             munition_asset_id=row["munition_asset_id"],

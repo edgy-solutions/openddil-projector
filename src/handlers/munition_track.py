@@ -7,7 +7,10 @@ effector_launch. See `PostgresPool.upsert_munition_track`.
 
 A munition is tracked by its own DIS id, never as an asset (ADR-0049). The
 launcher and labels are joined from the Fire row when it exists; a Fire that
-arrives later back-fills them (effector_launch.py). Terminal states come from
+arrives later back-fills them (effector_launch.py). That back-fill can lose a
+commit race with the first sample (each side commits before the other can see
+it), so every later track write re-joins while the launcher is NULL, and the
+sweep heals any row left over (munition_track_sweep.py). Terminal states come from
 the Detonation path in effector_launch.py, or from the silence sweep, which
 runs on this tier's own arrival clock and is a track state only -- never a
 launch outcome (ADR-0048 section 4 is untouched).

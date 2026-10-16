@@ -121,7 +121,7 @@ for _reason in ("no_munition_urn", "no_location", "bad_sample_time"):
     MUNITION_TRACK_REFUSED.labels(reason=_reason)
 for _outcome in ("inserted", "updated", "stale", "after_terminal"):
     MUNITION_TRACK_UPSERTS.labels(outcome=_outcome)
-for _via in ("fire", "track"):
+for _via in ("fire", "track", "heal"):
     MUNITION_TRACK_JOINED.labels(via=_via)
 
 # -- link heartbeat / link_monitor --------------------------------------------

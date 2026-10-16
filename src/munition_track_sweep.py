@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 
-from metrics import MUNITION_TRACK_SILENT
+from metrics import MUNITION_TRACK_JOINED, MUNITION_TRACK_SILENT
 from persistence import PostgresPool
 
 log = logging.getLogger("projector.munition_track_sweep")
@@ -34,25 +34,42 @@ def _warn_once(key: str, fmt: str, *args: object) -> None:
         log.warning(fmt + "  (further identical warnings suppressed)", *args)
 
 
-async def munition_track_sweep_loop(pool: PostgresPool) -> None:
-    """Mark in-flight tracks quiet for MUNITION_TRACK_SILENCE_S as 'silent',
-    forever, on this instance's own interval and clock."""
+async def sweep_pass(pool: PostgresPool) -> None:
+    """One pass: the silence sweep, then the launcher heal. Each warns on
+    failure and never raises."""
     from handlers.base import now_utc
 
+    try:
+        touched = await pool.sweep_munition_track_silence(
+            silence_s=MUNITION_TRACK_SILENCE_S,
+            now=now_utc(),
+        )
+        if touched:
+            MUNITION_TRACK_SILENT.inc(touched)
+            log.info("munition track sweep: %d track(s) -> silent", touched)
+    except Exception as exc:  # noqa: BLE001 - never let the sweep crash
+        _warn_once("munition-track-sweep-failed",
+                   "munition track silence sweep failed: %s", exc)
+    # A track whose launcher join lost a commit race converges here even if
+    # it never gets another sample (terminal rows included).
+    try:
+        healed = await pool.heal_munition_track_launchers(now=now_utc())
+        if healed:
+            MUNITION_TRACK_JOINED.labels(via="heal").inc(healed)
+            log.info("munition track sweep: %d track(s) labelled", healed)
+    except Exception as exc:  # noqa: BLE001 - never let the sweep crash
+        _warn_once("munition-track-heal-failed",
+                   "munition track launcher heal failed: %s", exc)
+
+
+async def munition_track_sweep_loop(pool: PostgresPool) -> None:
+    """Mark in-flight tracks quiet for MUNITION_TRACK_SILENCE_S as 'silent',
+    and heal launcher-less tracks, forever, on this instance's own interval
+    and clock."""
     log.info(
         "munition track silence sweep started: table=%s silence=%.0fs interval=%.0fs",
         TABLE, MUNITION_TRACK_SILENCE_S, MUNITION_TRACK_SWEEP_INTERVAL_S,
     )
     while True:
         await asyncio.sleep(MUNITION_TRACK_SWEEP_INTERVAL_S)
-        try:
-            touched = await pool.sweep_munition_track_silence(
-                silence_s=MUNITION_TRACK_SILENCE_S,
-                now=now_utc(),
-            )
-            if touched:
-                MUNITION_TRACK_SILENT.inc(touched)
-                log.info("munition track sweep: %d track(s) -> silent", touched)
-        except Exception as exc:  # noqa: BLE001 - never let the sweep crash
-            _warn_once("munition-track-sweep-failed",
-                       "munition track silence sweep failed: %s", exc)
+        await sweep_pass(pool)

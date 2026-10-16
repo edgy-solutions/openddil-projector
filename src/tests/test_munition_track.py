@@ -66,14 +66,15 @@ class _TrackPool:
                 "releasable_to": (ln or {}).get("releasable_to"),
             }
             return "inserted", ln is not None
+        unlabelled = t["launcher_asset_id"] is None
         if t["terminal_state"] is not None:
-            return "after_terminal", False
+            return "after_terminal", unlabelled and self._heal(munition_asset_id)
         t["last_heard_at"] = now
         if sample_time > t["last_sample_at"]:
             t["ecef"] = ecef
             t["last_sample_at"] = sample_time
-            return "updated", False
-        return "stale", False
+            return "updated", unlabelled and self._heal(munition_asset_id)
+        return "stale", unlabelled and self._heal(munition_asset_id)
 
     async def join_munition_track_launcher(self, *, munition_asset_id,
                                            launcher_asset_id, event_urn,
@@ -100,6 +101,7 @@ class _TrackPool:
         t = self.tracks.get(key) if key else None
         if t is None:
             return "skipped"
+        self._heal(key)
         if t["terminal_state"] not in (None, "silent"):
             return "replayed"
         late = t["terminal_state"] == "silent"
@@ -107,6 +109,28 @@ class _TrackPool:
                  detonation_result=detonation_result,
                  terminated_at=terminated_at, late_terminal=late)
         return "late" if late else "terminated"
+
+    async def heal_munition_track_launchers(self, *, now):
+        n = 0
+        for key, t in self.tracks.items():
+            if t["launcher_asset_id"] is None and self._heal(key):
+                n += 1
+        return n
+
+    def _heal(self, key):
+        t = self.tracks.get(key)
+        mine = [ln for ln in self.launches
+                if ln.get("munition_asset_id") == key]
+        if t is None or t["launcher_asset_id"] is not None or not mine:
+            return False
+        ln = max(mine, key=lambda r: r["launched_at"])
+        t.update(launcher_asset_id=ln["launcher_asset_id"],
+                 event_urn=ln["event_urn"],
+                 edge_id=ln.get("edge_id") or t["edge_id"],
+                 region_id=ln.get("region_id") or t["region_id"],
+                 originator_nation=ln.get("originator_nation"),
+                 releasable_to=ln.get("releasable_to"))
+        return True
 
     async def sweep_munition_track_silence(self, *, silence_s, now):
         n = 0
@@ -144,7 +168,7 @@ def _fire(urn=URN, event="dis-event:1:58:1", launcher="dis:1:58:1001"):
                           "extra": 0},
         "quantity": 1, "ingest_timestamp": "2026-10-15T11:59:00Z",
         "provenance": {"edge_id": "edge-fire", "region_id": "region-fire",
-                       "originator_nation": "USA", "releasable_to": ["GBR"]},
+                       "originator_nation": "ATL", "releasable_to": ["BDR"]},
     }
 
 
@@ -183,8 +207,8 @@ async def test_insert_with_launch_row_copies_launcher_and_labels():
     assert t["launcher_asset_id"] == "dis:1:58:1001"
     assert t["event_urn"] == "dis-event:1:58:1"
     assert t["edge_id"] == "edge-fire"
-    assert t["originator_nation"] == "USA"
-    assert t["releasable_to"] == ["GBR"]
+    assert t["originator_nation"] == "ATL"
+    assert t["releasable_to"] == ["BDR"]
     assert _count(metrics.MUNITION_TRACK_JOINED, via="track") == before + 1
 
 
@@ -196,7 +220,7 @@ async def test_fire_after_track_backfills_launcher():
     await effector_launch.handle("k", _fire(), pool)
     t = pool.tracks[URN]
     assert t["launcher_asset_id"] == "dis:1:58:1001"
-    assert t["releasable_to"] == ["GBR"]
+    assert t["releasable_to"] == ["BDR"]
     assert _count(metrics.MUNITION_TRACK_JOINED, via="fire") == before + 1
     # A second Fire cannot re-home an already-joined track.
     await effector_launch.handle("k", _fire(event="dis-event:1:58:2",
@@ -337,3 +361,119 @@ def test_terminal_vocabulary_is_effector_map_plus_silent():
     states = {effector_launch.terminal_state_for(c) for c in range(-1, 8)}
     assert states | {"silent"} == {"entity_impact", "ground_impact", "detonated",
                                     "dud", "other", "silent"}
+
+
+# -- launcher heal: a missed join converges (race outcome) --------------------
+
+def _race(pool, *, urn=URN, launcher="dis:1:58:1001", event="dis-event:1:58:1"):
+    """A track row with a NULL launcher and a launch row present, as if the
+    insert's join and the Fire's back-fill both missed. Built by hand, never
+    through the join paths."""
+    pool.tracks[urn] = {
+        "launcher_asset_id": None, "event_urn": None,
+        "munition_type": "2.9.225.2.1.1.0", "ecef": (1.0, 2.0, 3.0),
+        "first_seen_at": T0, "last_sample_at": T0,
+        "last_heard_at": T0, "terminal_state": None,
+        "detonation_result": None, "terminated_at": None,
+        "late_terminal": False, "edge_id": "edge-01", "region_id": "region-01",
+        "originator_nation": None, "releasable_to": None,
+    }
+    pool.launches.append({
+        "event_urn": event, "launcher_asset_id": launcher,
+        "munition_asset_id": urn, "launched_at": T0 - timedelta(seconds=1),
+        "edge_id": "edge-fire", "region_id": "region-fire",
+        "originator_nation": "ATL", "releasable_to": ["BDR"],
+        "terminal_state": None,
+    })
+
+
+def _labelled(t):
+    assert t["launcher_asset_id"] == "dis:1:58:1001"
+    assert t["event_urn"] == "dis-event:1:58:1"
+    assert t["edge_id"] == "edge-fire" and t["region_id"] == "region-fire"
+    assert t["originator_nation"] == "ATL"
+    assert t["releasable_to"] == ["BDR"]
+
+
+async def test_heal_on_newer_sample():
+    pool = _TrackPool()
+    _race(pool)
+    before = _count(metrics.MUNITION_TRACK_JOINED, via="track")
+    await munition_track.handle(URN, _rec(t=T0 + timedelta(seconds=1)), pool)
+    _labelled(pool.tracks[URN])
+    assert _count(metrics.MUNITION_TRACK_JOINED, via="track") == before + 1
+
+
+async def test_heal_on_stale_sample():
+    pool = _TrackPool()
+    _race(pool)
+    before = _count(metrics.MUNITION_TRACK_JOINED, via="track")
+    await munition_track.handle(URN, _rec(t=T0 - timedelta(seconds=5)), pool)
+    _labelled(pool.tracks[URN])
+    assert _count(metrics.MUNITION_TRACK_JOINED, via="track") == before + 1
+
+
+async def test_heal_on_sample_after_terminal_keeps_state():
+    pool = _TrackPool()
+    _race(pool)
+    pool.tracks[URN].update(terminal_state="dud", terminated_at=T0)
+    await munition_track.handle(URN, _rec(t=T0 + timedelta(seconds=9)), pool)
+    t = pool.tracks[URN]
+    _labelled(t)
+    assert t["terminal_state"] == "dud" and t["terminated_at"] == T0
+    assert t["last_sample_at"] == T0
+
+
+async def test_heal_on_detonation():
+    pool = _TrackPool()
+    _race(pool)
+    await effector_launch.handle("k", _det(result=1), pool)
+    t = pool.tracks[URN]
+    assert t["terminal_state"] == "entity_impact"
+    _labelled(t)
+
+
+async def test_sweep_pass_labels_terminal_null_row_and_never_rehomes():
+    from munition_track_sweep import sweep_pass
+    pool = _TrackPool()
+    _race(pool)                                   # terminal, NULL launcher
+    pool.tracks[URN].update(terminal_state="dud", terminated_at=T0)
+    other = "dis:1:1:5002"
+    _race(pool, urn=other, launcher="dis:1:58:2001", event="dis-event:1:58:2")
+    pool.tracks[other]["launcher_asset_id"] = "dis:1:58:1111"   # joined to A
+    pool.tracks[other]["event_urn"] = "dis-event:1:58:7"
+    pool.launches[-1]["launched_at"] = T0 + timedelta(seconds=30)  # newer, names B
+    before = _count(metrics.MUNITION_TRACK_JOINED, via="heal")
+    await sweep_pass(pool)
+    t = pool.tracks[URN]
+    _labelled(t)
+    assert t["terminal_state"] == "dud"
+    assert pool.tracks[other]["launcher_asset_id"] == "dis:1:58:1111"
+    assert pool.tracks[other]["event_urn"] == "dis-event:1:58:7"
+    assert _count(metrics.MUNITION_TRACK_JOINED, via="heal") == before + 1
+
+
+async def test_null_row_with_no_launch_stays_null():
+    from munition_track_sweep import sweep_pass
+    pool = _TrackPool()
+    await munition_track.handle(URN, _rec(), pool)
+    await munition_track.handle(URN, _rec(t=T0 + timedelta(seconds=1)), pool)
+    await effector_launch.handle("k", _det(result=1), pool)
+    await sweep_pass(pool)
+    t = pool.tracks[URN]
+    assert t["launcher_asset_id"] is None and t["event_urn"] is None
+    assert t["edge_id"] == "edge-01"
+
+
+def test_heal_sql_shape():
+    for scoped in (True, False):
+        sql = PostgresPool.build_munition_track_launcher_heal_sql(scoped)
+        assert sql.startswith('UPDATE "munition_track"')
+        assert "effector_launch" in sql
+        assert "DISTINCT ON" in sql
+        assert '"launcher_asset_id" IS NULL' in sql
+        assert "DELETE" not in sql.upper()
+        assert sql.count("UPDATE") == 1 and "INSERT" not in sql.upper()
+        assert ('"munition_asset_id" = $1' in sql) is scoped
+    assert "$2" in PostgresPool.build_munition_track_launcher_heal_sql(True)
+    assert "$2" not in PostgresPool.build_munition_track_launcher_heal_sql(False)

@@ -557,7 +557,14 @@ class PostgresPool:
                               newer.
           "stale"          -- non-terminal row, sample not newer; only
                               last_heard_at touched (the track is still alive).
-          "after_terminal" -- row already terminal; nothing written.
+          "after_terminal" -- row already terminal; nothing written except
+                              the launcher heal below.
+
+        `joined` is also True when a track that was still unlabelled took its
+        launcher from the launch row on this write (updated / stale /
+        after_terminal): the back-fill in join_munition_track_launcher can
+        lose a commit race with the first sample, and the next track write or
+        the sweep (heal_munition_track_launchers) closes it.
         """
         if self._pool is None:
             raise RuntimeError("PostgresPool.upsert_munition_track before connect()")
@@ -566,7 +573,8 @@ class PostgresPool:
             async with conn.transaction():
                 for _ in range(2):
                     row = await conn.fetchrow(
-                        'SELECT "terminal_state", "last_sample_at" '
+                        'SELECT "terminal_state", "last_sample_at", '
+                        '"launcher_asset_id" '
                         'FROM "munition_track" WHERE "munition_asset_id" = $1 '
                         'FOR UPDATE',
                         munition_asset_id,
@@ -604,8 +612,14 @@ class PostgresPool:
                     # Lost an insert race; re-select the winner and advance it.
                 else:  # pragma: no cover
                     return "stale", False
+                # A track still without a launcher re-joins the newest launch
+                # on every write that touches it, in this transaction: the
+                # insert-time join and the Fire's back-fill can both miss
+                # (each commits before the other can see it).
+                unlabelled = row["launcher_asset_id"] is None
                 if row["terminal_state"] is not None:
-                    return "after_terminal", False
+                    return "after_terminal", (
+                        unlabelled and await self._heal_one(conn, munition_asset_id, now))
                 if sample_time > row["last_sample_at"]:
                     await conn.execute(
                         'UPDATE "munition_track" SET "ecef_x" = $2, "ecef_y" = $3, '
@@ -614,13 +628,15 @@ class PostgresPool:
                         'WHERE "munition_asset_id" = $1',
                         munition_asset_id, x, y, z, sample_time, now,
                     )
-                    return "updated", False
+                    return "updated", (
+                        unlabelled and await self._heal_one(conn, munition_asset_id, now))
                 await conn.execute(
                     'UPDATE "munition_track" SET "last_heard_at" = $2, '
                     '"updated_at" = $2 WHERE "munition_asset_id" = $1',
                     munition_asset_id, now,
                 )
-                return "stale", False
+                return "stale", (
+                    unlabelled and await self._heal_one(conn, munition_asset_id, now))
 
     async def join_munition_track_launcher(
         self,
@@ -637,7 +653,9 @@ class PostgresPool:
         """Fire arrived after its track: give the track its launcher, event
         and the launcher's labels. Only rows still without a launcher are
         touched, so a later Fire cannot re-home a joined track. Returns rows
-        touched."""
+        touched. This can lose a commit race with the track's first insert
+        (neither side sees the other's uncommitted row); the next track write
+        and the sweep heal (heal_munition_track_launchers) close that."""
         if self._pool is None:
             raise RuntimeError(
                 "PostgresPool.join_munition_track_launcher before connect()"
@@ -699,6 +717,7 @@ class PostgresPool:
                 )
                 if row is None:
                     return "skipped"
+                await self._heal_one(conn, key, now)
                 old_state = row["terminal_state"]
                 if old_state is not None and old_state != "silent":
                     return "replayed"
@@ -712,6 +731,62 @@ class PostgresPool:
                     late, now,
                 )
                 return "late" if late else "terminated"
+
+    @staticmethod
+    def build_munition_track_launcher_heal_sql(scoped: bool) -> str:
+        """UPDATE, never DELETE: give launcher-less tracks the labels of the
+        newest effector_launch row for the same munition, exactly as
+        join_munition_track_launcher does. Only `"launcher_asset_id" IS NULL`
+        rows are touched, so a joined track is never re-homed; terminal rows
+        are included (a label is not a state transition). Scoped: $1 = one
+        munition, $2 = now. Unscoped: $1 = now."""
+        now = "$2" if scoped else "$1"
+        only = ' AND "munition_asset_id" = $1' if scoped else ""
+        only_t = ' AND t."munition_asset_id" = $1' if scoped else ""
+        return (
+            'UPDATE "munition_track" t SET '
+            '"launcher_asset_id" = l."launcher_asset_id", '
+            '"event_urn" = l."event_urn", '
+            '"edge_id" = COALESCE(l."edge_id", t."edge_id"), '
+            '"region_id" = COALESCE(l."region_id", t."region_id"), '
+            '"originator_nation" = l."originator_nation", '
+            '"releasable_to" = l."releasable_to", '
+            f'"updated_at" = {now} '
+            'FROM (SELECT DISTINCT ON ("munition_asset_id") '
+            '"munition_asset_id", "launcher_asset_id", "event_urn", '
+            '"edge_id", "region_id", "originator_nation", "releasable_to" '
+            'FROM "effector_launch" WHERE "munition_asset_id" IS NOT NULL'
+            f'{only} '
+            'ORDER BY "munition_asset_id", "launched_at" DESC) l '
+            'WHERE t."munition_asset_id" = l."munition_asset_id" '
+            f'AND t."launcher_asset_id" IS NULL{only_t}'
+        )
+
+    async def _heal_one(self, conn: Any, munition_asset_id: str, now: Any) -> bool:
+        """Scoped heal inside the caller's transaction. True if a row changed."""
+        result = await conn.execute(
+            self.build_munition_track_launcher_heal_sql(True),
+            munition_asset_id, now,
+        )
+        try:
+            return int(result.split()[-1]) > 0
+        except (ValueError, IndexError):  # pragma: no cover
+            return False
+
+    async def heal_munition_track_launchers(self, *, now: Any) -> int:
+        """Heal every launcher-less track that has a launch row (sweep pass).
+        Returns rows touched."""
+        if self._pool is None:
+            raise RuntimeError(
+                "PostgresPool.heal_munition_track_launchers before connect()"
+            )
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                self.build_munition_track_launcher_heal_sql(False), now)
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):  # pragma: no cover
+            return 0
 
     @staticmethod
     def build_munition_track_silence_sweep_sql() -> str:
