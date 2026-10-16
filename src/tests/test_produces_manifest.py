@@ -107,3 +107,17 @@ def test_code_produces_exactly_the_manifest():
 def test_manifest_is_exactly_the_the_projector_image():
     assert set(MANIFEST) == {"projector"}
     assert {w["image"] for w in MANIFEST.values()} == {"openddil/projector"}
+
+
+def test_the_when_gate_is_the_code_gate(monkeypatch):
+    """produces.yaml's `when:` names the env condition a topic is produced under; the helm check drops a gated
+    topic from a workload whose rendered env does not meet it, so it must be the code's own gate."""
+    assert MANIFEST["projector"].get("when") == {"link-heartbeat": "LINK_HEARTBEAT_ENABLED=true"}
+    import edge_buffer_monitor as ebm
+    monkeypatch.setattr(ebm, "LINK_ID", "link-under-test")
+    monkeypatch.delenv("LINK_HEARTBEAT_ENABLED", raising=False)
+    assert ebm.link_heartbeat_enabled() is False
+    assert ebm.start_link_heartbeat() is None
+    for value, want in (("true", True), ("TRUE", True), ("false", False), ("1", False), ("", False)):
+        monkeypatch.setenv("LINK_HEARTBEAT_ENABLED", value)
+        assert ebm.link_heartbeat_enabled() is want, value

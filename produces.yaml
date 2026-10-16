@@ -8,3 +8,7 @@ workloads:
     image: openddil/projector
     topics:
       - link-heartbeat
+    # when: <topic>: <VAR>=<value> -- produced only when the workload's env VAR, lowercased, equals value. The helm
+    # check drops a gated topic from a workload whose rendered env does not meet it (the hub projector sets none).
+    when:
+      link-heartbeat: LINK_HEARTBEAT_ENABLED=true
