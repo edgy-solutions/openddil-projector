@@ -57,7 +57,8 @@ async def pool():
             'terminal_state text NULL, detonation_result int NULL, '
             'terminated_at timestamptz NULL, late_terminal boolean NOT NULL DEFAULT false, '
             'edge_id text NULL, region_id text NULL, originator_nation text NULL, '
-            'releasable_to text[] NULL, updated_at timestamptz NOT NULL DEFAULT now())'
+            'releasable_to text[] NULL, updated_at timestamptz NOT NULL DEFAULT now(), '
+            'trail_ecef double precision[] NULL)'
         )
         await conn.execute(
             'CREATE TABLE "effector_launch" ('
@@ -179,3 +180,66 @@ async def test_no_launch_stays_null(pool):
     await _sample(pool, T0 + timedelta(seconds=1))
     assert await pool.heal_munition_track_launchers(now=T0) == 0
     assert (await _track(pool))["launcher_asset_id"] is None
+
+
+# -- trail_ecef (ADR-0049) ----------------------------------------------------
+
+TRAIL_URN = "dis:9:9:1"
+
+
+def _triples(flat):
+    return [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
+
+
+async def _move(pool, n, urn=TRAIL_URN):
+    return await pool.upsert_munition_track(
+        munition_asset_id=urn, munition_type="2.9.225.2.1.1.0",
+        ecef=(float(n), 2.0, 3.0), sample_time=T0 + timedelta(seconds=n),
+        edge_id="edge-01", region_id="region-01", now=T0 + timedelta(seconds=n))
+
+
+async def test_trail_grows_and_ends_at_the_latest_ecef(pool):
+    assert await _move(pool, 0) == ("inserted", False)
+    for n in (1, 2, 3):
+        assert (await _move(pool, n))[0] == "updated"
+    r = await _track(pool, TRAIL_URN)
+    assert len(_triples(r["trail_ecef"])) == 4
+    assert _triples(r["trail_ecef"])[-1] == (r["ecef_x"], r["ecef_y"], r["ecef_z"])
+
+
+async def test_stale_sample_leaves_the_trail_alone(pool):
+    await _move(pool, 5)
+    await _move(pool, 6)
+    before = (await _track(pool, TRAIL_URN))["trail_ecef"]
+    assert (await _move(pool, 3))[0] == "stale"
+    after = await _track(pool, TRAIL_URN)
+    assert after["trail_ecef"] == before and after["ecef_x"] == 6.0
+
+
+async def test_trail_caps_at_ten_triples(pool):
+    await _move(pool, 0)
+    for n in range(1, 13):
+        await _move(pool, n)
+    trail = (await _track(pool, TRAIL_URN))["trail_ecef"]
+    assert len(_triples(trail)) == 10
+    assert _triples(trail)[0][0] == 3.0 and _triples(trail)[-1][0] == 12.0
+
+
+@pytest.fixture
+async def pool_no_trail_column(pool):
+    """The same table as a bundle image that predates the migration has it."""
+    async with pool._pool.acquire() as conn:
+        await conn.execute('ALTER TABLE "munition_track" DROP COLUMN "trail_ecef"')
+    pool._trail_supported = None  # forget the probe made against the full table
+    return pool
+
+
+async def test_table_without_trail_column_still_works(pool_no_trail_column, caplog):
+    pool = pool_no_trail_column
+    with caplog.at_level("WARNING", logger="projector.postgres"):
+        assert await _move(pool, 0) == ("inserted", False)
+        assert (await _move(pool, 1))[0] == "updated"
+        assert (await _move(pool, 0))[0] == "stale"
+    r = await _track(pool, TRAIL_URN)
+    assert "trail_ecef" not in r and r["ecef_x"] == 1.0
+    assert sum("trail_ecef" in m for m in caplog.messages) == 1  # cached False, one probe

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,29 @@ log = logging.getLogger("projector.postgres")
 # answer to the question ADR-0044's Alignment section says is still open
 # about *who* may assert it, not about *where* the assertion lives once made.
 LIFECYCLE_TABLE = "telemetry_latest_state"
+
+# munition_track keeps its own recent path (ADR-0049): the last N ECEF
+# samples, flat [x0,y0,z0, x1,y1,z1, ...], oldest first.
+MUNITION_TRAIL_SAMPLES = 10
+_TRAIL_EPS = 1e-6
+# How long a "column absent" probe answer is believed before asking again.
+_TRAIL_PROBE_RETRY_S = 300.0
+
+
+def next_munition_trail(prev, x: float, y: float, z: float) -> list[float]:
+    """The trail after one more sample. Pure.
+
+    A sample equal (within 1e-6 per axis) to the last kept triple returns
+    `prev` unchanged: a repeated point makes the frontend's Catmull-Rom spline
+    produce NaN. A None / empty / not-a-multiple-of-3 `prev` starts fresh.
+    """
+    if not prev or len(prev) % 3 != 0:
+        return [x, y, z]
+    lx, ly, lz = prev[-3:]
+    if (abs(lx - x) <= _TRAIL_EPS and abs(ly - y) <= _TRAIL_EPS
+            and abs(lz - z) <= _TRAIL_EPS):
+        return prev
+    return list(prev[-3 * (MUNITION_TRAIL_SAMPLES - 1):]) + [x, y, z]
 
 
 @dataclass(frozen=True)
@@ -135,6 +159,31 @@ class PostgresPool:
         self._pool: asyncpg.Pool | None = None
         self._retry_base = retry_base_seconds
         self._retry_max = retry_max_seconds
+        # munition_track.trail_ecef probe: True is kept for the life of the
+        # pool; False is re-probed after _TRAIL_PROBE_RETRY_S (monotonic).
+        self._trail_supported: bool | None = None
+        self._trail_recheck_at = 0.0
+
+    async def _munition_trail_supported(self, conn) -> bool:
+        """Does munition_track have trail_ecef here? The bundle image carrying
+        the migration can lag this image; without the column the old SQL runs."""
+        if self._trail_supported is True:
+            return True
+        now = time.monotonic()
+        if self._trail_supported is False and now < self._trail_recheck_at:
+            return False
+        found = await conn.fetchval(
+            'SELECT 1 FROM information_schema.columns '
+            'WHERE table_schema = current_schema() '
+            "AND table_name = 'munition_track' AND column_name = 'trail_ecef'")
+        self._trail_supported = found is not None
+        if not self._trail_supported:
+            self._trail_recheck_at = now + _TRAIL_PROBE_RETRY_S
+            log.warning(
+                "munition_track.trail_ecef is absent (schema older than this "
+                "projector); writing tracks without a trail, re-probing in %ds",
+                int(_TRAIL_PROBE_RETRY_S))
+        return self._trail_supported
 
     async def connect(self) -> None:
         """Open the pool. Retries until Postgres is reachable."""
@@ -571,10 +620,12 @@ class PostgresPool:
         x, y, z = ecef
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                trail = await self._munition_trail_supported(conn)
                 for _ in range(2):
                     row = await conn.fetchrow(
                         'SELECT "terminal_state", "last_sample_at", '
-                        '"launcher_asset_id" '
+                        '"launcher_asset_id"'
+                        + (', "trail_ecef"' if trail else '') + ' '
                         'FROM "munition_track" WHERE "munition_asset_id" = $1 '
                         'FOR UPDATE',
                         munition_asset_id,
@@ -594,9 +645,9 @@ class PostgresPool:
                         '"ecef_x", "ecef_y", "ecef_z", "first_seen_at", '
                         '"last_sample_at", "last_heard_at", "edge_id", '
                         '"region_id", "originator_nation", "releasable_to", '
-                        '"updated_at") '
+                        '"updated_at"' + (', "trail_ecef"' if trail else '') + ') '
                         'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, '
-                        '$11, $12, $13, $9) '
+                        '$11, $12, $13, $9' + (', $14' if trail else '') + ') '
                         'ON CONFLICT ("munition_asset_id") DO NOTHING',
                         munition_asset_id,
                         launch["launcher_asset_id"] if launch else None,
@@ -606,6 +657,7 @@ class PostgresPool:
                         (launch["region_id"] if launch else None) or region_id,
                         launch["originator_nation"] if launch else None,
                         launch["releasable_to"] if launch else None,
+                        *(([x, y, z],) if trail else ()),
                     )
                     if inserted.endswith(" 1"):
                         return "inserted", launch is not None
@@ -624,9 +676,12 @@ class PostgresPool:
                     await conn.execute(
                         'UPDATE "munition_track" SET "ecef_x" = $2, "ecef_y" = $3, '
                         '"ecef_z" = $4, "last_sample_at" = $5, '
-                        '"last_heard_at" = $6, "updated_at" = $6 '
+                        '"last_heard_at" = $6, "updated_at" = $6'
+                        + (', "trail_ecef" = $7' if trail else '') + ' '
                         'WHERE "munition_asset_id" = $1',
                         munition_asset_id, x, y, z, sample_time, now,
+                        *((next_munition_trail(row["trail_ecef"], x, y, z),)
+                          if trail else ()),
                     )
                     return "updated", (
                         unlabelled and await self._heal_one(conn, munition_asset_id, now))
