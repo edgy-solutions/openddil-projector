@@ -202,26 +202,9 @@ mappings:
     mode: upsert
     asset_ttl_hours: 24
 
-  # openddil-logistics-sim publishes one whole-asset snapshot per tick
-  # as JSON, keyed by asset_id. Compacted -> upsert. Lands only on HQ
-  # broker (sim runs there); projector-hq is the only instance that
-  # sees data. Topic carries snapshots for every asset_profiles[]
-  # the sim is configured with -- MRAD today, LTAMDS / Patriot to
-  # follow as logistics-sim config additions. element_id format is
-  # documented in openddil-logistics-sim/README.md and must match
-  # the SensorArrayView frontend output byte-for-byte.
-  - topic: asset-element-telemetry
-    handler: asset_element_telemetry
-    table: asset_element_telemetry
-    consumer_group: projector-asset-element-telemetry
-    decode_as: json
-    # custom: the handler writes the per-asset row plus change-only
-    # asset_element_state rows in one transaction, and needs
-    # ELEMENT_STATE_JSON (deadbands, health bands, heartbeat_s). It stays
-    # in the prune (asset_ttl_hours, kept fresh by the per-asset heartbeat);
-    # asset_element_state rows go only when the asset's row here is gone.
-    mode: custom
-    asset_ttl_hours: 24
+  # asset-element-telemetry is not mapped here: element rows never cross above
+  # the owning tier, so only the tier projector config (openddil-helm
+  # openddil.tierProjectorConfig) maps it.
 
   # 2026-06-30: per-asset per-layer inventory aggregate. Sim publishes
   # one JSON envelope per (asset_id, layer_name) per tick on
