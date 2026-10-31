@@ -983,10 +983,13 @@ class PostgresPool:
             # Rows owned by another table's row: removed only when the owner
             # has no row for the asset. Never by this table's own updated_at
             # (change-only rows stay quiet by design). No parameters.
+            # RETURNING the distinct asset ids lets the caller evict any
+            # in-memory last-written state held for those assets.
             return (
-                f'DELETE FROM "{table}" AS s WHERE NOT EXISTS ('
+                f'WITH d AS (DELETE FROM "{table}" AS s WHERE NOT EXISTS ('
                 f'SELECT 1 FROM "{parent}" AS p '
-                f'WHERE p."asset_id" = s."asset_id")'
+                f'WHERE p."asset_id" = s."asset_id") RETURNING s."asset_id") '
+                f'SELECT DISTINCT "asset_id" FROM d'
             )
         age_predicate = (
             f'"{time_column}" < now() - ($1 || \' hours\')::interval'
@@ -1006,6 +1009,16 @@ class PostgresPool:
             f'WHERE lc."asset_id" = t."asset_id" '
             f'AND lc."operational_status" IN ({terminal_list}))'
         )
+
+    async def prune_owned(self, table: str) -> list[str]:
+        """Prune a PARENT_OWNED_PRUNE table; returns the distinct asset ids
+        whose rows were deleted."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.prune_owned before connect()")
+        sql = self.build_prune_sql(table, "", asset_id_keyed=True)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql)
+        return [r["asset_id"] for r in rows]
 
     async def prune_older_than(self, table: str, time_column: str,
                                hours: float, *,

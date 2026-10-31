@@ -154,6 +154,10 @@ ELEMENT_CHANGES_EMITTED = Counter(
 )
 for _class in ("value", "transition"):
     ELEMENT_CHANGES_EMITTED.labels(**{"class": _class})
+ELEMENT_CACHE_EVICTED = Counter(
+    "openddil_element_cache_evicted_total",
+    "Assets dropped from the element last-written cache after their element rows were pruned",
+)
 ELEMENT_UNDECLARED_KIND = Counter(
     "openddil_element_undeclared_kind_total",
     "Elements skipped because their layer_name has no declared deadband",

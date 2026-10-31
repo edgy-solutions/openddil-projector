@@ -399,6 +399,14 @@ async def prune_loop(pool: PostgresPool, mappings: list[Mapping]) -> None:
         await asyncio.sleep(PRUNE_INTERVAL_S)
         for table, key_col, hours, asset_id_keyed in all_targets:
             try:
+                if table in PARENT_OWNED_PRUNE:
+                    ids = await pool.prune_owned(table)
+                    if ids:
+                        log.info("pruned %s rows for %d asset(s)", table, len(ids))
+                        if table == "asset_element_state":
+                            from handlers import asset_element_telemetry
+                            asset_element_telemetry.evict_assets(ids)
+                    continue
                 deleted = await pool.prune_older_than(
                     table, key_col, hours, asset_id_keyed=asset_id_keyed)
                 if deleted:

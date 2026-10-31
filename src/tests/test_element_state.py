@@ -396,3 +396,40 @@ async def test_metric_names_and_labels_as_exported(monkeypatch):
     line = next(ln for ln in text.splitlines()
                 if ln.startswith("openddil_element_changes_emitted_total{"))
     assert "tier" not in line
+
+
+def test_element_state_prune_sql_returns_distinct_asset_ids():
+    sql = PostgresPool.build_prune_sql("asset_element_state", "", asset_id_keyed=True)
+    assert sql.startswith('WITH d AS (DELETE FROM "asset_element_state" AS s')
+    assert 'RETURNING s."asset_id"' in sql
+    assert sql.endswith('SELECT DISTINCT "asset_id" FROM d')
+
+
+def test_age_predicate_prune_sql_unchanged():
+    assert PostgresPool.build_prune_sql("asset_element_telemetry", "updated_at",
+                                        asset_id_keyed=False) == (
+        'DELETE FROM "asset_element_telemetry" WHERE '
+        '"updated_at" < now() - ($1 || \' hours\')::interval')
+    assert "RETURNING" not in PostgresPool.build_prune_sql(
+        "asset_element_telemetry", "updated_at", asset_id_keyed=True)
+
+
+async def test_evicted_asset_next_snapshot_writes_full_tree_and_asset_row():
+    pool = FakePool()
+    await run(pool, snapshot())
+    pool.db.clear()  # the prune deleted the rows
+    pool.calls.clear()
+    assert h.evict_assets(["A1", "never-seen"]) == 1
+    await run(pool, snapshot())
+    assert len(pool.calls) == 1
+    asset_write, rows = pool.calls[0]
+    assert asset_write is not None
+    assert sorted(paths(rows)) == sorted(p for p, _ in CHAIN)
+
+
+async def test_unevicted_asset_same_snapshot_writes_nothing():
+    pool = FakePool()
+    await run(pool, snapshot())
+    pool.calls.clear()
+    await run(pool, snapshot())
+    assert pool.calls == []

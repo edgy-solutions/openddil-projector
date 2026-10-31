@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from metrics import ELEMENT_CHANGES_EMITTED, ELEMENT_UNDECLARED_KIND
+from metrics import ELEMENT_CACHE_EVICTED, ELEMENT_CHANGES_EMITTED, ELEMENT_UNDECLARED_KIND
 from persistence import Write
 
 from .base import _label_source, now_utc, releasability_from, resolve_origin_or_derive
@@ -312,6 +312,21 @@ def reset_state() -> None:
     """Forget all in-memory last-written state (tests)."""
     _assets.clear()
     _logged_undeclared.clear()
+
+
+def evict_assets(asset_ids: Any) -> int:
+    """Drop the in-memory last-written state (elements, heartbeat signature)
+    for assets whose rows were pruned, so their next snapshot is a first
+    observation and writes the full tree plus the per-asset row. Returns the
+    number of cached assets evicted."""
+    n = 0
+    for aid in asset_ids:
+        if _assets.pop(aid, None) is not None:
+            n += 1
+    if n:
+        ELEMENT_CACHE_EVICTED.inc(n)
+        log.info("evicted %d asset(s) from the element cache after prune", n)
+    return n
 
 
 def _observed_at_from_ns(observed_at_ns: Any) -> datetime:
