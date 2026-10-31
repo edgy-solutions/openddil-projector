@@ -97,6 +97,19 @@ def load_config(path: Path | None = None) -> Config:
     for entry in raw.get("mappings", []):
         mode = entry.get("mode", "upsert")
         asset_ttl = entry.get("asset_ttl_hours")
+        # asset_element_telemetry's handler takes (key, decoded, pool) and
+        # its element rows are pruned only through the per-asset row's TTL.
+        # Under upsert it is called with two args (every snapshot raises),
+        # and without a TTL the prune never runs: refuse at load.
+        if entry["handler"] == "asset_element_telemetry" and not (
+            mode == "custom" and asset_ttl and float(asset_ttl) > 0
+        ):
+            raise ValueError(
+                f"mapping for topic {entry['topic']!r}: handler "
+                "asset_element_telemetry requires mode: custom and a "
+                f"positive asset_ttl_hours (got mode={mode!r}, "
+                f"asset_ttl_hours={asset_ttl!r})"
+            )
         # A custom mapping that declares its own asset_ttl_hours is pruned
         # like an upsert one (asset_element_telemetry); other custom
         # mappings never take a TTL from the env.

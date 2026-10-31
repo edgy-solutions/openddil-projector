@@ -111,3 +111,38 @@ def test_env_unset_preserves_yaml(tmp_path, monkeypatch):
             asset_ttl_hours: 48
     """))
     assert cfg.mappings[0].asset_ttl_hours == 48
+
+
+def _element_yaml(extra):
+    return f"""
+        mappings:
+          - topic: asset-element-telemetry
+            handler: asset_element_telemetry
+            table: asset_element_telemetry
+            consumer_group: g1
+            decode_as: json
+{extra}
+    """
+
+
+def test_element_telemetry_upsert_refused(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROJECTOR_ASSET_TTL_HOURS", raising=False)
+    import pytest
+    with pytest.raises(ValueError, match="asset-element-telemetry"):
+        load_config(_write_yaml(tmp_path, _element_yaml(
+            "            mode: upsert\n            asset_ttl_hours: 24")))
+
+
+def test_element_telemetry_custom_without_ttl_refused(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROJECTOR_ASSET_TTL_HOURS", raising=False)
+    import pytest
+    with pytest.raises(ValueError, match="asset-element-telemetry"):
+        load_config(_write_yaml(tmp_path, _element_yaml(
+            "            mode: custom")))
+
+
+def test_element_telemetry_custom_with_ttl_accepted(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROJECTOR_ASSET_TTL_HOURS", raising=False)
+    cfg = load_config(_write_yaml(tmp_path, _element_yaml(
+        "            mode: custom\n            asset_ttl_hours: 24")))
+    assert cfg.mappings[0].asset_ttl_hours == 24
