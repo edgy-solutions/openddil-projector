@@ -144,6 +144,22 @@ LINK_HEARTBEATS_REJECTED = Counter(
 for _reason in ("malformed", "unexpected"):
     LINK_HEARTBEATS_REJECTED.labels(reason=_reason)
 
+# -- asset_element_state (change-only element rows) ---------------------------
+# No tier label: no metric in this module carries one (each projector instance
+# is one tier, identified by its scrape target), so only `class` is exported.
+ELEMENT_CHANGES_EMITTED = Counter(
+    "openddil_element_changes_emitted_total",
+    "asset_element_state rows written because an element changed, by change class",
+    ["class"],
+)
+for _class in ("value", "transition"):
+    ELEMENT_CHANGES_EMITTED.labels(**{"class": _class})
+ELEMENT_UNDECLARED_KIND = Counter(
+    "openddil_element_undeclared_kind_total",
+    "Elements skipped because their layer_name has no declared deadband",
+    ["layer_name"],
+)
+
 
 def start_metrics_server() -> int:
     """Start the Prometheus HTTP endpoint. Returns the port it bound."""

@@ -112,6 +112,19 @@ class Write:
     revive: Revive | None = None
 
 
+ELEMENT_STATE_COLUMNS = (
+    "asset_id", "element_path", "parent_path", "depth", "layer_name",
+    "health", "health_band", "temp_c", "load_pct", "tx_active", "rx_active",
+    "moved_by", "value_changes", "subtree_changes", "subtree_changes_window",
+    "observed_at", "updated_at", "originator_nation", "releasable_to",
+    "provenance",
+)
+
+# table -> owner table. Rows are deleted only when the owner has no row for
+# the asset (see PostgresPool.build_prune_sql).
+PARENT_OWNED_PRUNE = {"asset_element_state": "asset_element_telemetry"}
+
+
 class StoreNotConfigured(RuntimeError):
     """Neither POSTGRES_DSN nor the PG* environment names a store."""
 
@@ -893,6 +906,51 @@ class PostgresPool:
                         rows,
                     )
 
+    # -- asset_element_state (change-only element rows) ----------------------
+
+    @staticmethod
+    def build_element_state_upsert_sql() -> str:
+        """Upsert of one element row; executemany'd as one batch. Pure.
+        Row tuples follow ELEMENT_STATE_COLUMNS."""
+        cols = ", ".join(f'"{c}"' for c in ELEMENT_STATE_COLUMNS)
+        ph = ", ".join(
+            f"${i + 1}::jsonb" if c == "provenance" else f"${i + 1}"
+            for i, c in enumerate(ELEMENT_STATE_COLUMNS))
+        sets = ", ".join(
+            f'"{c}" = EXCLUDED."{c}"' for c in ELEMENT_STATE_COLUMNS
+            if c not in ("asset_id", "element_path"))
+        return (f'INSERT INTO "asset_element_state" ({cols}) VALUES ({ph}) '
+                f'ON CONFLICT ("asset_id", "element_path") DO UPDATE SET {sets}')
+
+    async def fetch_element_state(self, asset_id: str) -> list[dict[str, Any]]:
+        """All asset_element_state rows for one asset (restart reload)."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.fetch_element_state before connect()")
+        async with self._pool.acquire() as conn:
+            recs = await conn.fetch(
+                'SELECT * FROM "asset_element_state" WHERE "asset_id" = $1', asset_id)
+        return [dict(r) for r in recs]
+
+    async def write_element_state(self, asset_write: Write | None,
+                                  rows: list[dict[str, Any]]) -> None:
+        """The per-asset row and the element rows in ONE transaction."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.write_element_state before connect()")
+        sql = self.build_element_state_upsert_sql()
+        batch = [tuple(json.dumps(r.get(c)) if c == "provenance" else r.get(c)
+                       for c in ELEMENT_STATE_COLUMNS) for r in rows]
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    if asset_write is not None:
+                        await conn.execute(self.build_sql(asset_write),
+                                           *self._bind_values(asset_write))
+                    if batch:
+                        await conn.executemany(sql, batch)
+        except asyncpg.PostgresError as exc:
+            raise PostgresWriteError(
+                f"non-retryable write to asset_element_state: {exc}") from exc
+
     @staticmethod
     def build_prune_sql(table: str, time_column: str, *,
                          asset_id_keyed: bool) -> str:
@@ -920,6 +978,16 @@ class PostgresPool:
         must never be a prune input (ADR §2 — it answers a different question
         than "is this asset gone").
         """
+        parent = PARENT_OWNED_PRUNE.get(table)
+        if parent is not None:
+            # Rows owned by another table's row: removed only when the owner
+            # has no row for the asset. Never by this table's own updated_at
+            # (change-only rows stay quiet by design). No parameters.
+            return (
+                f'DELETE FROM "{table}" AS s WHERE NOT EXISTS ('
+                f'SELECT 1 FROM "{parent}" AS p '
+                f'WHERE p."asset_id" = s."asset_id")'
+            )
         age_predicate = (
             f'"{time_column}" < now() - ($1 || \' hours\')::interval'
         )
@@ -948,8 +1016,9 @@ class PostgresPool:
             raise RuntimeError("PostgresPool.prune_older_than before connect()")
         sql = self.build_prune_sql(table, time_column,
                                     asset_id_keyed=asset_id_keyed)
+        args = (str(hours),) if "$1" in sql else ()
         async with self._pool.acquire() as conn:
-            result = await conn.execute(sql, str(hours))
+            result = await conn.execute(sql, *args)
         # asyncpg returns e.g. "DELETE 12"
         try:
             return int(result.split()[-1])

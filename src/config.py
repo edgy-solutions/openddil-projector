@@ -97,7 +97,11 @@ def load_config(path: Path | None = None) -> Config:
     for entry in raw.get("mappings", []):
         mode = entry.get("mode", "upsert")
         asset_ttl = entry.get("asset_ttl_hours")
-        if mode == "upsert" and env_ttl_override is not None:
+        # A custom mapping that declares its own asset_ttl_hours is pruned
+        # like an upsert one (asset_element_telemetry); other custom
+        # mappings never take a TTL from the env.
+        if ((mode == "upsert" or (mode == "custom" and asset_ttl))
+                and env_ttl_override is not None):
             # 0 disables; positive value overrides whatever yaml said.
             asset_ttl = env_ttl_override if env_ttl_override > 0 else None
         mappings.append(

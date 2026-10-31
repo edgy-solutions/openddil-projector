@@ -41,6 +41,11 @@ from effector_declared_load import DeclaredLoadConfigError, load_declared_load
 from effector_sweep import effector_sweep_loop
 from munition_track_sweep import munition_track_sweep_loop
 from handlers import get_handler
+from handlers.asset_element_telemetry import (
+    ENV_VAR as ELEMENT_STATE_ENV,
+    ElementStateConfigError,
+    configure as configure_element_state,
+)
 from link_monitor import link_monitor_enabled, link_monitor_loop
 from metrics import (
     DECODE_ERRORS,
@@ -54,6 +59,7 @@ from metrics import (
 )
 from persistence import PostgresPool
 from persistence.postgres import (
+    PARENT_OWNED_PRUNE,
     PostgresWriteError,
     StoreNotConfigured,
     store_dsn_from_env,
@@ -304,6 +310,11 @@ NON_ASSET_ID_KEYED_UPSERT_TABLES = frozenset({"inventory_items"})
 # run can exercise a full prune pass on a human timescale (paired with
 # PROJECTOR_ASSET_TTL_HOURS set to a fraction of an hour) instead of waiting
 # out a real 3600s sleep to see ADR-0044's terminal-status gate fire.
+# "custom" mappings that are nevertheless pruned (age on updated_at plus the
+# ADR-0044 join), like their former upsert form. Every other custom table
+# stays out of the prune.
+CUSTOM_PRUNED_TABLES = frozenset({"asset_element_telemetry"})
+
 PRUNE_INTERVAL_S = float(os.getenv("PROJECTOR_PRUNE_INTERVAL_S", "3600"))
 
 
@@ -326,13 +337,21 @@ def build_prune_targets(
         (m.table, "updated_at", m.asset_ttl_hours,
          m.table not in NON_ASSET_ID_KEYED_UPSERT_TABLES)
         for m in mappings
-        if m.mode == "upsert" and m.asset_ttl_hours
+        if (m.mode == "upsert"
+            or (m.mode == "custom" and m.table in CUSTOM_PRUNED_TABLES))
+        and m.asset_ttl_hours
     ]
     # Dependents-before-lifecycle-table within the upsert group (see
     # prune_loop's docstring). Stable sort: only telemetry_latest_state's
     # relative position moves, to last.
     from persistence.postgres import LIFECYCLE_TABLE
     upsert_tables.sort(key=lambda t: t[0] == LIFECYCLE_TABLE)
+    # Tables owned by a pruned table's row follow it in the same pass. The
+    # target carries no age column or hours: it is not aged by its own rows.
+    for child, parent in PARENT_OWNED_PRUNE.items():
+        idx = next((i for i, t in enumerate(upsert_tables) if t[0] == parent), None)
+        if idx is not None:
+            upsert_tables.insert(idx + 1, (child, "", 0.0, True))
     return append_tables + upsert_tables
 
 
@@ -426,6 +445,15 @@ async def main() -> None:
         "edge_assignment configured: strategy=%s",
         (config.edge_assignment or {}).get("strategy") or "none",
     )
+
+    # asset-element-telemetry is change-only against declared deadbands; no
+    # defaults, so a missing or invalid ELEMENT_STATE_JSON is fatal.
+    if any(mp.handler == "asset_element_telemetry" for mp in config.mappings):
+        try:
+            configure_element_state(os.getenv(ELEMENT_STATE_ENV))
+        except ElementStateConfigError as exc:
+            log.error("asset_element_telemetry mapping refused to start: %s", exc)
+            sys.exit(1)
 
     port = start_metrics_server()
     log.info("metrics server on :%d", port)

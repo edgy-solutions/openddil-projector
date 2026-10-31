@@ -215,7 +215,12 @@ mappings:
     table: asset_element_telemetry
     consumer_group: projector-asset-element-telemetry
     decode_as: json
-    mode: upsert
+    # custom: the handler writes the per-asset row plus change-only
+    # asset_element_state rows in one transaction, and needs
+    # ELEMENT_STATE_JSON (deadbands, health bands, heartbeat_s). It stays
+    # in the prune (asset_ttl_hours, kept fresh by the per-asset heartbeat);
+    # asset_element_state rows go only when the asset's row here is gone.
+    mode: custom
     asset_ttl_hours: 24
 
   # 2026-06-30: per-asset per-layer inventory aggregate. Sim publishes
