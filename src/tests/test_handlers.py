@@ -79,7 +79,7 @@ def test_cm_state_maps_json_shape_with_integer_enums():
     assert write.row["last_alerted_status"] == "CONFIG_STATUS_NOT_MISSION_CAPABLE"
     # *_ns integer timestamps parsed to datetime
     assert isinstance(write.row["as_of"], datetime)
-    assert isinstance(write.row["last_observed_at"], datetime)
+    assert write.row["last_observed_at"] is None
     # both discrepancy lists preserved
     assert write.row["discrepancies"] == [
         {"discrepancy_id": "D1", "type": 5, "severity": 3}
@@ -875,3 +875,12 @@ def test_telemetry_latest_no_kinematics_and_no_claim_has_no_revive():
     }
     write = get_handler("telemetry_latest")("dis:1:1:1007", decoded)
     assert write.revive is None
+
+
+def test_cm_state_last_observed_at_is_null_with_or_without_the_input():
+    h = get_handler("cm_state")
+    with_clock = h("A1", {"lifecycle": 2, "last_observed_at_ns": 1778738710276935936})
+    without = h("A1", {"lifecycle": 2})
+    assert with_clock.row["last_observed_at"] is None
+    assert without.row["last_observed_at"] is None
+    assert "last_observed_at" in without.row

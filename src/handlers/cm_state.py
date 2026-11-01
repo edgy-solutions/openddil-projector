@@ -88,9 +88,10 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
             else None
         ),
         "as_of": parse_ns_timestamp(decoded.get("as_of_ns")),
-        "last_observed_at": parse_ns_timestamp(
-            decoded.get("last_observed_at_ns")
-        ),
+        # Always NULL: the asset's observation clock is the asset's reporting
+        # row (telemetry_latest_state.last_sample_at). Old records that still
+        # carry last_observed_at_ns are ignored too.
+        "last_observed_at": None,
         "installed": decoded.get("installed", []),
         "mod_status": decoded.get("mod_status", []),
         "discrepancies": decoded.get("discrepancies", []),
