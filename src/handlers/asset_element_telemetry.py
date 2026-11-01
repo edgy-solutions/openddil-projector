@@ -34,6 +34,15 @@ Change-only (Option D, DESIGN-D-element-state.md 3.1, 3.2, 3.4, 3.6.4, 3.6.5):
 * Last-written state is held in memory per asset and loaded from the table on
   the first envelope for the asset after start.
 
+Labels (ADR-0029 section 3): the element feed carries none, so the asset's
+labels are read from the tier's asset label record (telemetry_latest_state,
+the asset's ingress stamp) once per envelope and stamped on both row types.
+A write for an asset whose record is missing or unlabelled is refused with a
+declared reason; nothing is written and no in-memory state advances, so the
+next envelope retries the same diff. When the record's labels change, the
+write that follows also restamps the asset's existing element rows in the
+same transaction.
+
 Config is `ELEMENT_STATE_JSON`, validated at start; there are no defaults.
 """
 from __future__ import annotations
@@ -46,10 +55,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from metrics import ELEMENT_CACHE_EVICTED, ELEMENT_CHANGES_EMITTED, ELEMENT_UNDECLARED_KIND
+from metrics import (
+    ELEMENT_CACHE_EVICTED,
+    ELEMENT_CHANGES_EMITTED,
+    ELEMENT_LABEL_RESTAMPS,
+    ELEMENT_UNDECLARED_KIND,
+    ELEMENT_WRITES_REFUSED,
+)
 from persistence import Write
 
-from .base import _label_source, now_utc, releasability_from, resolve_origin_or_derive
+from .base import now_utc, refuse_row, resolve_origin_or_derive
 
 log = logging.getLogger("projector.element_state")
 
@@ -298,6 +313,7 @@ class _AssetState:
     elements: dict[str, dict[str, Any]]
     asset_sig: tuple | None = None
     asset_written_at: float = 0.0
+    stamped_labels: dict[str, Any] | None = None
 
 
 _assets: dict[str, _AssetState] = {}
@@ -355,7 +371,10 @@ async def handle(key: str, decoded: dict[str, Any], pool: Any) -> None:
 
     observed_at = _observed_at_from_ns(decoded.get("observed_at_ns"))
     prov = resolve_origin_or_derive(None, asset_id, HANDLER_LABEL)
-    labels = releasability_from(_label_source(decoded))
+    record_labels = await pool.fetch_asset_labels(asset_id)
+    labels = record_labels or {}
+    if labels and st.stamped_labels is None:
+        st.stamped_labels = dict(labels)  # first envelope after start: no restamp
 
     rows, classes, undeclared = diff_snapshot(cfg, st.elements, elements, observed_at)
     for layer, n in undeclared.items():
@@ -368,7 +387,7 @@ async def handle(key: str, decoded: dict[str, Any], pool: Any) -> None:
     operational = decoded.get("operational") or {}
     sig = (str(decoded.get("platform_variant") or ""), str(decoded.get("profile_name") or ""),
            json.dumps(operational, sort_keys=True, default=str),
-           json.dumps(labels, sort_keys=True, default=str))
+           json.dumps(labels or st.stamped_labels or {}, sort_keys=True, default=str))
     now = _clock()
     asset_write: Write | None = None
     if st.asset_sig != sig or now - st.asset_written_at >= cfg.heartbeat_s:
@@ -389,6 +408,13 @@ async def handle(key: str, decoded: dict[str, Any], pool: Any) -> None:
     if asset_write is None and not rows:
         return
 
+    if not labels:
+        reason = "no_label_record" if record_labels is None else "label_record_unlabelled"
+        refuse_row(HANDLER_LABEL, reason, f"asset_id={asset_id}")
+        ELEMENT_WRITES_REFUSED.labels(reason=reason).inc()
+        return
+    restamp = st.stamped_labels is not None and labels != st.stamped_labels
+
     stamp = now_utc()
     full_rows = [
         {"asset_id": asset_id, **r, "updated_at": stamp,
@@ -397,10 +423,14 @@ async def handle(key: str, decoded: dict[str, Any], pool: Any) -> None:
          "provenance": dict(prov)}
         for r in rows.values()
     ]
-    await pool.write_element_state(asset_write, full_rows)
+    await pool.write_element_state(asset_write, full_rows,
+                                   restamp_labels=dict(labels) if restamp else None)
 
     # Durable: only now advance the in-memory last-written state.
     st.elements.update(rows)
+    st.stamped_labels = dict(labels)
+    if restamp:
+        ELEMENT_LABEL_RESTAMPS.inc()
     if asset_write is not None:
         st.asset_sig = sig
         st.asset_written_at = now

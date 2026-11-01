@@ -12,6 +12,7 @@ import socket
 import urllib.request
 
 import pytest
+from prometheus_client import REGISTRY
 
 import metrics
 from config import Mapping
@@ -42,13 +43,26 @@ class FakePool:
         self.db: dict[tuple[str, str], dict] = {}
         self.calls: list[tuple] = []  # (asset_write, rows)
         self.fetches: list[str] = []
+        # the asset label record: per-asset override, else `default_labels`
+        # (None = no record, {} = unlabelled record)
+        self.labels: dict[str, dict | None] = {}
+        self.default_labels: dict | None = {"originator_nation": "ATL",
+                                            "releasable_to": ["BDR"]}
+        self.restamps: list[dict | None] = []
+
+    async def fetch_asset_labels(self, asset_id):
+        return self.labels.get(asset_id, self.default_labels)
 
     async def fetch_element_state(self, asset_id):
         self.fetches.append(asset_id)
         return [copy.deepcopy(r) for (a, _), r in self.db.items() if a == asset_id]
 
-    async def write_element_state(self, asset_write, rows):
+    async def write_element_state(self, asset_write, rows, *, restamp_labels=None):
+        self.restamps.append(restamp_labels)
         self.calls.append((asset_write, copy.deepcopy(rows)))
+        if restamp_labels is not None:
+            for r in self.db.values():
+                r.update(restamp_labels)
         for r in rows:
             self.db[(r["asset_id"], r["element_path"])] = copy.deepcopy(r)
 
@@ -240,22 +254,103 @@ def test_element_provenance_keys_are_edge_and_region():
                                                   "region_id": "region-01"}
 
 
-async def test_labels_nested_and_unlabelled():
+def _sample(name, **labels):
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+def _refused(reason):
+    return _sample("openddil_element_writes_refused_total", reason=reason)
+
+
+async def test_labels_come_from_the_record_not_the_envelope():
     pool = FakePool()
-    snap = snapshot(layers=[("X", "CHIP")])
-    del snap["originator_nation"], snap["releasable_to"]
+    pool.labels["A1"] = {"originator_nation": "QRS", "releasable_to": ["TUV"]}
+    snap = snapshot(layers=[("X", "CHIP")])  # envelope says ATL / BDR
+    snap["provenance"] = {"originator_nation": "WXY", "releasable_to": []}
     await run(pool, snap)
-    assert "originator_nation" not in pool.calls[0][0].row
-    assert pool.element_rows[0]["originator_nation"] is None
-    assert pool.element_rows[0]["releasable_to"] is None
+    asset_write, rows = pool.calls[0]
+    assert asset_write.row["originator_nation"] == "QRS"
+    assert asset_write.row["releasable_to"] == ["TUV"]
+    assert (rows[0]["originator_nation"], rows[0]["releasable_to"]) == ("QRS", ["TUV"])
+
+
+async def test_no_label_record_refuses_without_advancing_then_retries_in_full():
+    pool = FakePool()
+    pool.default_labels = None
+    before = _refused("no_label_record")
+    await run(pool, snapshot())
+    assert pool.calls == []
+    assert _refused("no_label_record") == before + 1
+    st = h._assets["A1"]
+    assert st.elements == {} and st.asset_sig is None and st.asset_written_at == 0.0
+    pool.default_labels = {"originator_nation": "ATL", "releasable_to": ["BDR"]}
+    await run(pool, snapshot())
+    asset_write, rows = pool.calls[0]
+    assert asset_write is not None
+    assert sorted(paths(rows)) == sorted(p for p, _ in CHAIN)
+
+
+async def test_unlabelled_record_refuses_without_advancing():
+    pool = FakePool()
+    pool.default_labels = {}
+    before = _refused("label_record_unlabelled")
+    await run(pool, snapshot())
+    assert pool.calls == []
+    assert _refused("label_record_unlabelled") == before + 1
+    st = h._assets["A1"]
+    assert st.elements == {} and st.asset_sig is None
+    pool.default_labels = {"originator_nation": "ATL", "releasable_to": []}
+    await run(pool, snapshot())
+    assert sorted(paths(pool.element_rows)) == sorted(p for p, _ in CHAIN)
+
+
+async def test_nothing_to_write_without_a_record_counts_no_refusal():
+    pool = FakePool()
+    await run(pool, snapshot())
+    pool.default_labels = None
+    pool.calls.clear()
+    before = _refused("no_label_record")
+    await run(pool, snapshot(t_ns=2_000_000_000))
+    assert pool.calls == [] and _refused("no_label_record") == before
+
+
+async def test_label_change_restamps_once_and_rewrites_the_asset_row():
+    pool = FakePool()
+    await run(pool, snapshot())
+    assert pool.restamps == [None]
+    pool.default_labels = {"originator_nation": "QRS", "releasable_to": []}
+    before = _sample("openddil_element_label_restamps_total")
+    await run(pool, snapshot(temp=60.0, t_ns=2_000_000_000))
+    asset_write, rows = pool.calls[-1]
+    assert pool.restamps[-1] == {"originator_nation": "QRS", "releasable_to": []}
+    assert asset_write is not None and asset_write.row["originator_nation"] == "QRS"
+    assert _sample("openddil_element_label_restamps_total") == before + 1
+    assert all(r["originator_nation"] == "QRS" for r in pool.db.values())
+    await run(pool, snapshot(temp=70.0, t_ns=3_000_000_000))
+    assert pool.restamps[-1] is None  # already stamped with the new labels
+
+
+async def test_first_envelope_after_restart_does_not_restamp():
+    pool = FakePool()
+    await run(pool, snapshot())
     h.reset_state()
-    snap = snapshot(layers=[("X", "CHIP")])
-    del snap["originator_nation"], snap["releasable_to"]
-    snap["provenance"] = {"originator_nation": "ATL", "releasable_to": ["BDR"]}
-    pool = FakePool()
-    await run(pool, snap)
-    assert pool.calls[0][0].row["releasable_to"] == ["BDR"]
-    assert pool.element_rows[0]["originator_nation"] == "ATL"
+    pool.default_labels = {"originator_nation": "QRS", "releasable_to": []}
+    pool.calls.clear()
+    pool.restamps.clear()
+    before = _sample("openddil_element_label_restamps_total")
+    await run(pool, snapshot())
+    assert len(pool.calls) == 1  # the per-asset row, carrying the new labels
+    assert pool.restamps == [None]
+    assert _sample("openddil_element_label_restamps_total") == before
+
+
+def test_restamp_sql_is_label_only_and_skips_matching_rows():
+    sql = PostgresPool.build_element_restamp_sql()
+    assert sql == (
+        'UPDATE "asset_element_state" SET "originator_nation" = $2, '
+        '"releasable_to" = $3 WHERE "asset_id" = $1 AND '
+        '("originator_nation", "releasable_to") IS DISTINCT FROM ($2, $3)')
+    assert "updated_at" not in sql
 
 
 # -- undeclared layer --------------------------------------------------------------
@@ -393,6 +488,10 @@ async def test_metric_names_and_labels_as_exported(monkeypatch):
     assert 'openddil_element_changes_emitted_total{class="transition"}' in text
     assert "# TYPE openddil_element_undeclared_kind_total counter" in text
     assert 'openddil_element_undeclared_kind_total{layer_name="NOPE"}' in text
+    assert "# TYPE openddil_element_writes_refused_total counter" in text
+    assert 'openddil_element_writes_refused_total{reason="no_label_record"}' in text
+    assert 'openddil_element_writes_refused_total{reason="label_record_unlabelled"}' in text
+    assert "# TYPE openddil_element_label_restamps_total counter" in text
     line = next(ln for ln in text.splitlines()
                 if ln.startswith("openddil_element_changes_emitted_total{"))
     assert "tier" not in line

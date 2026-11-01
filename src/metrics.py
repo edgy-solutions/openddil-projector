@@ -158,6 +158,17 @@ ELEMENT_CACHE_EVICTED = Counter(
     "openddil_element_cache_evicted_total",
     "Assets dropped from the element last-written cache after their element rows were pruned",
 )
+ELEMENT_WRITES_REFUSED = Counter(
+    "openddil_element_writes_refused_total",
+    "Element envelopes whose write was refused because the asset has no labels in its label record",
+    ["reason"],
+)
+for _reason in ("no_label_record", "label_record_unlabelled"):
+    ELEMENT_WRITES_REFUSED.labels(reason=_reason)
+ELEMENT_LABEL_RESTAMPS = Counter(
+    "openddil_element_label_restamps_total",
+    "Assets whose element rows were restamped because their label record changed",
+)
 ELEMENT_UNDECLARED_KIND = Counter(
     "openddil_element_undeclared_kind_total",
     "Elements skipped because their layer_name has no declared deadband",

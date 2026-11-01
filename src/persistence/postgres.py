@@ -931,17 +931,51 @@ class PostgresPool:
                 'SELECT * FROM "asset_element_state" WHERE "asset_id" = $1', asset_id)
         return [dict(r) for r in recs]
 
+    async def fetch_asset_labels(self, asset_id: str) -> dict[str, Any] | None:
+        """The asset's labels from its label record (telemetry_latest_state).
+        None when the asset has no record; {} when the record is unlabelled."""
+        if self._pool is None:
+            raise RuntimeError("PostgresPool.fetch_asset_labels before connect()")
+        async with self._pool.acquire() as conn:
+            rec = await conn.fetchrow(
+                'SELECT originator_nation, releasable_to FROM "telemetry_latest_state" '
+                'WHERE "asset_id" = $1', asset_id)
+        if rec is None:
+            return None
+        from handlers.base import releasability_from  # handlers import this module
+        return releasability_from(dict(rec))
+
+    @staticmethod
+    def build_element_restamp_sql() -> str:
+        """Relabel one asset's element rows; labels are not diff fields, so
+        updated_at and every other column stay as written. Pure."""
+        return ('UPDATE "asset_element_state" SET "originator_nation" = $2, '
+                '"releasable_to" = $3 WHERE "asset_id" = $1 AND '
+                '("originator_nation", "releasable_to") IS DISTINCT FROM ($2, $3)')
+
     async def write_element_state(self, asset_write: Write | None,
-                                  rows: list[dict[str, Any]]) -> None:
-        """The per-asset row and the element rows in ONE transaction."""
+                                  rows: list[dict[str, Any]], *,
+                                  restamp_labels: dict[str, Any] | None = None) -> None:
+        """The per-asset row and the element rows in ONE transaction. With
+        restamp_labels, the asset's existing element rows are relabelled first
+        in the same transaction."""
         if self._pool is None:
             raise RuntimeError("PostgresPool.write_element_state before connect()")
         sql = self.build_element_state_upsert_sql()
         batch = [tuple(json.dumps(r.get(c)) if c == "provenance" else r.get(c)
                        for c in ELEMENT_STATE_COLUMNS) for r in rows]
+        restamp_asset_id = None
+        if restamp_labels is not None:
+            restamp_asset_id = (asset_write.row if asset_write is not None else rows[0])["asset_id"]
         try:
             async with self._pool.acquire() as conn:
                 async with conn.transaction():
+                    if restamp_labels is not None:
+                        await conn.execute(
+                            self.build_element_restamp_sql(),
+                            restamp_asset_id,
+                            restamp_labels["originator_nation"],
+                            restamp_labels["releasable_to"])
                     if asset_write is not None:
                         await conn.execute(self.build_sql(asset_write),
                                            *self._bind_values(asset_write))

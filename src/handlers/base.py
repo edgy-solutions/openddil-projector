@@ -268,6 +268,10 @@ def resolve_provenance_from_top_level(envelope: dict, asset_id: str,
 # labelled-LOOKING row that no policy could ever release and no gate would
 # ever flag — the worst of both, and undetectable once written.
 #
+# One exception, a carry and not a derivation: element rows take the asset's
+# own ingress stamp from telemetry_latest_state at write, because the element
+# feed carries none (ADR-0029 §3, note of 2026-11-01).
+#
 # Empty-string and empty-list are treated as absent, deliberately. proto3
 # cannot distinguish "producer said nothing" from "producer said empty" for
 # either field (see Provenance's field comments), so the consumer must not
