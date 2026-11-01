@@ -53,6 +53,11 @@ LINK_RESTORE_ARRIVALS = int(os.getenv("LINK_RESTORE_ARRIVALS", "3"))
 # within this many seconds (absolute, so modest clock skew either way passes).
 LINK_FRESH_MAX_AGE_S = float(os.getenv("LINK_FRESH_MAX_AGE_S", str(LINK_DOWN_AFTER_S)))
 UPSERT_INTERVAL_S = 2.0
+# An unchanged link row is rewritten (liveness columns only) this often.
+LINK_STATUS_HEARTBEAT_S = float(os.getenv("LINK_STATUS_HEARTBEAT_S", "30"))
+# A traffic band change reaches the row only after the new band has been
+# reported continuously for this long.
+LINK_TRAFFIC_HOLD_S = float(os.getenv("LINK_TRAFFIC_HOLD_S", "10"))
 
 
 def _csv(name: str) -> list[str]:
@@ -168,8 +173,19 @@ class LastSeen:
     bridge_lag: int
 
 
-def build_row(link_id: str, state: str, last: LastSeen | None, declared_idle: bool, now_mono: float) -> Write:
+def build_row(
+    link_id: str,
+    state: str,
+    last: LastSeen | None,
+    declared_idle: bool,
+    now_mono: float,
+    traffic: str | None = None,
+) -> Write:
+    """`traffic` is the held band (ACTIVE / IDLE / UNSPECIFIED); when absent,
+    the last reported band is used."""
     from handlers.base import now_utc
+
+    band = traffic if traffic is not None else (last.traffic if last else "UNSPECIFIED")
 
     return Write(
         table="link_status",
@@ -178,7 +194,7 @@ def build_row(link_id: str, state: str, last: LastSeen | None, declared_idle: bo
         row={
             "id": link_id,
             "link_state": state,
-            "traffic": last.traffic.lower() if last else "unspecified",
+            "traffic": band.lower(),
             "declared_idle": declared_idle,
             "heartbeat_age_s": (now_mono - last.arrival) if last else None,
             "last_heartbeat_at": last.emitted_at if last else None,
@@ -198,12 +214,35 @@ class LinkState:
         down_after_s: float,
         start: float,
         wall_clock: Callable[[], datetime] | None = None,
+        traffic_hold_s: float = LINK_TRAFFIC_HOLD_S,
     ) -> None:
         self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
         self._expected = list(expected)
         self._declared = set(declared_idle)
         self._trackers = {i: LinkTracker(down_after_s, start, link_id=i) for i in self._expected}
         self._last: dict[str, LastSeen] = {}
+        self._hold_s = traffic_hold_s
+        self._held: dict[str, str] = {}
+        # link -> (band, monotonic time it was first reported in this run)
+        self._candidate: dict[str, tuple[str, float]] = {}
+
+    def _observe_band(self, link_id: str, band: str, now_mono: float) -> None:
+        held = self._held.get(link_id)
+        if held is None:
+            self._held[link_id] = band      # first band seen is taken as is
+        elif band == held:
+            self._candidate.pop(link_id, None)
+        else:
+            cand = self._candidate.get(link_id)
+            if cand is None or cand[0] != band:
+                self._candidate[link_id] = (band, now_mono)
+
+    def _held_band(self, link_id: str, now_mono: float) -> str:
+        cand = self._candidate.get(link_id)
+        if cand is not None and now_mono - cand[1] >= self._hold_s:
+            self._held[link_id] = cand[0]
+            del self._candidate[link_id]
+        return self._held.get(link_id, "UNSPECIFIED")
 
     def ingest(self, raw: bytes, now_mono: float) -> None:
         try:
@@ -221,19 +260,68 @@ class LinkState:
         age_s = None if hb.emitted_at.timestamp() <= 0 else (self._wall_clock() - hb.emitted_at).total_seconds()
         tracker.on_arrival(now_mono, age_s)
         self._last[hb.link_id] = LastSeen(now_mono, hb.emitted_at, hb.traffic, hb.bridge_lag)
+        self._observe_band(hb.link_id, hb.traffic, now_mono)
 
     def rows(self, now_mono: float) -> list[Write]:
         out = []
         for link_id in self._expected:
             last = self._last.get(link_id)
             declared = link_id in self._declared
-            state = classify(
-                self._trackers[link_id].reach(now_mono),
-                last.traffic if last else "UNSPECIFIED",
-                declared,
-            )
-            out.append(build_row(link_id, state, last, declared, now_mono))
+            band = self._held_band(link_id, now_mono)
+            state = classify(self._trackers[link_id].reach(now_mono), band, declared)
+            out.append(build_row(link_id, state, last, declared, now_mono, band))
         return out
+
+
+_HEARTBEAT_COLUMNS = ("updated_at", "last_heartbeat_at", "heartbeat_age_s", "bridge_lag")
+
+
+class LinkWritePlanner:
+    """Decides, per link, whether a freshly built row is written, and how.
+    No I/O and no clock reads: the caller passes the monotonic now.
+
+    change     the (link_state, traffic, declared_idle) triple differs from the
+               last one written, or nothing was written yet: the full row.
+    heartbeat  unchanged, but `heartbeat_s` has passed since the last write of
+               either kind: an update of the four liveness columns only.
+    None       nothing is due.
+    `record` is called only after the write succeeded, so a failed write is
+    retried on the next tick as whatever kind is then due."""
+
+    def __init__(self, heartbeat_s: float) -> None:
+        self._heartbeat_s = heartbeat_s
+        self._written: dict[str, tuple[tuple, float]] = {}
+
+    @staticmethod
+    def _triple(write: Write) -> tuple:
+        r = write.row
+        return (r["link_state"], r["traffic"], r["declared_idle"])
+
+    def plan(self, write: Write, now_mono: float) -> tuple[str, Write] | None:
+        link_id = write.row["id"]
+        prev = self._written.get(link_id)
+        if prev is None or prev[0] != self._triple(write):
+            return "change", write
+        if now_mono - prev[1] >= self._heartbeat_s:
+            return "heartbeat", Write(
+                table=write.table,
+                mode="update",
+                key_columns=["id"],
+                row={"id": link_id, **{c: write.row[c] for c in _HEARTBEAT_COLUMNS}},
+            )
+        return None
+
+    def record(self, write: Write, kind: str, now_mono: float) -> None:
+        link_id = write.row["id"]
+        if kind == "change":
+            self._written[link_id] = (self._triple(write), now_mono)
+        else:
+            self._written[link_id] = (self._written[link_id][0], now_mono)
+
+    def forget(self, link_id: str) -> None:
+        """The row is not in the table (an update matched nothing): the next
+        tick writes it in full."""
+        self._written.pop(link_id, None)
 
 
 def _open_consumer() -> Consumer:
@@ -277,13 +365,24 @@ async def _consume(state: LinkState) -> None:
 
 async def _upsert(state: LinkState, pool: PostgresPool) -> None:
     loop = asyncio.get_running_loop()
+    planner = LinkWritePlanner(LINK_STATUS_HEARTBEAT_S)
     while True:
         await asyncio.sleep(UPSERT_INTERVAL_S)
-        for write in state.rows(loop.time()):
+        now = loop.time()
+        for built in state.rows(now):
+            planned = planner.plan(built, now)
+            if planned is None:
+                continue
+            kind, write = planned
             try:
-                await pool.execute(write)
+                result = await pool.execute(write)
             except Exception as exc:  # noqa: BLE001 - never let the monitor crash
                 log.warning("link_status write failed: %s", exc)
+                continue
+            if kind == "heartbeat" and result == 0:
+                planner.forget(built.row["id"])
+            else:
+                planner.record(built, kind, now)
 
 
 async def link_monitor_loop(pool: PostgresPool) -> None:
@@ -292,7 +391,9 @@ async def link_monitor_loop(pool: PostgresPool) -> None:
     loop = asyncio.get_running_loop()
     state = LinkState(expected, declared, LINK_DOWN_AFTER_S, loop.time())
     log.info(
-        "link monitor started: expected=%s declared_idle=%s down_after=%.1fs restore_arrivals=%d fresh_max_age=%.1fs",
+        "link monitor started: expected=%s declared_idle=%s down_after=%.1fs restore_arrivals=%d fresh_max_age=%.1fs "
+        "status_heartbeat=%.1fs traffic_hold=%.1fs",
         expected, declared, LINK_DOWN_AFTER_S, LINK_RESTORE_ARRIVALS, LINK_FRESH_MAX_AGE_S,
+        LINK_STATUS_HEARTBEAT_S, LINK_TRAFFIC_HOLD_S,
     )
     await asyncio.gather(_consume(state), _upsert(state, pool))
