@@ -1,7 +1,9 @@
 """Unit tests for the persistence layer — pure SQL building, no live DB."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 
 import pytest
 
@@ -250,3 +252,88 @@ def test_revive_column_that_is_also_a_row_key_is_refused():
 def test_revive_at_from_missing_from_row_is_refused():
     with pytest.raises(ValueError):
         PostgresPool.build_sql(_revive_write(row={"asset_id": "A1", "x": 1}))
+
+
+# --- reconnect loops have no last retry ------------------------------------
+
+_OUTAGE_ATTEMPTS = 1100  # past 1024, where 0.5 * 2**attempt overflows a float
+
+
+def test_backoff_values_and_cap_for_any_attempt():
+    pool = PostgresPool(
+        "postgres://unused", retry_base_seconds=0.5, retry_max_seconds=30.0)
+    assert [pool._backoff(a) for a in (0, 1, 2)] == [0.5, 1.0, 2.0]
+    for attempt in (6, 7, 1023, 1024, 2000, 1_000_000):
+        assert pool._backoff(attempt) == 30.0
+
+
+def _count_sleeps(monkeypatch):
+    delays: list[float] = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr("persistence.postgres.asyncio.sleep", fake_sleep)
+    return delays
+
+
+def test_execute_survives_past_attempt_1024(monkeypatch, caplog):
+    caplog.set_level(logging.CRITICAL)
+    delays = _count_sleeps(monkeypatch)
+
+    class _Conn:
+        async def execute(self, sql, *values):
+            return "INSERT 0 1"
+
+    class _Acquire:
+        def __init__(self, owner):
+            self._owner = owner
+
+        async def __aenter__(self):
+            self._owner.entries += 1
+            if self._owner.entries <= _OUTAGE_ATTEMPTS:
+                raise OSError("postgres down")
+            return _Conn()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakePool:
+        entries = 0
+
+        def acquire(self):
+            return _Acquire(self)
+
+    pool = PostgresPool("postgres://unused")
+    pool._pool = _FakePool()
+    write = Write(
+        table="tactical_events",
+        mode="append",
+        key_columns=["id"],
+        row={"id": "ce-1", "source": "cm", "type": "x", "subject": "A1",
+             "data": {}},
+        jsonb_columns={"data"},
+    )
+    assert asyncio.run(pool.execute(write)) is None
+    assert len(delays) == _OUTAGE_ATTEMPTS
+    assert all(d == 30.0 for d in delays[6:])
+
+
+def test_connect_survives_past_attempt_1024(monkeypatch, caplog):
+    caplog.set_level(logging.CRITICAL)
+    delays = _count_sleeps(monkeypatch)
+    sentinel = object()
+    calls = {"n": 0}
+
+    async def fake_create_pool(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= _OUTAGE_ATTEMPTS:
+            raise OSError("postgres down")
+        return sentinel
+
+    monkeypatch.setattr("persistence.postgres.asyncpg.create_pool",
+                        fake_create_pool)
+    pool = PostgresPool("postgres://unused")
+    asyncio.run(pool.connect())
+    assert pool._pool is sentinel
+    assert len(delays) == _OUTAGE_ATTEMPTS

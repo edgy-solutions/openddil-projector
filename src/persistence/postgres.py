@@ -39,6 +39,9 @@ MUNITION_TRAIL_SAMPLES = 10
 _TRAIL_EPS = 1e-6
 # How long a "column absent" probe answer is believed before asking again.
 _TRAIL_PROBE_RETRY_S = 300.0
+# An outage has no last retry, so attempt has no upper bound. The exponent
+# stops well past any real maximum, so the product can never overflow a float.
+_BACKOFF_EXPONENT_CAP = 62
 
 
 def next_munition_trail(prev, x: float, y: float, z: float) -> list[float]:
@@ -225,7 +228,10 @@ class PostgresPool:
             self._pool = None
 
     def _backoff(self, attempt: int) -> float:
-        return min(self._retry_base * (2 ** attempt), self._retry_max)
+        return min(
+            self._retry_base * (2 ** min(attempt, _BACKOFF_EXPONENT_CAP)),
+            self._retry_max,
+        )
 
     # -- SQL building -------------------------------------------------------
 
