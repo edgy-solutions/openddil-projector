@@ -105,6 +105,10 @@ class Write:
                 `revive.at_column` from the row's `revive.at_from`), else
                 leave both columns as they were. Neither column may also be
                 a key in `row`: the CASE must be their only assignment.
+    labels_from_record — append only: the asset_id whose label record
+                (telemetry_latest_state at this tier) labels the row. The
+                row is inserted only when that record carries a nation;
+                `row` must not hold the label columns itself.
     """
 
     table: str
@@ -113,6 +117,14 @@ class Write:
     row: dict[str, Any]
     jsonb_columns: set[str] = field(default_factory=set)
     revive: Revive | None = None
+    labels_from_record: str | None = None
+
+
+# What `execute` returns for a labelled append. The two refusals are the
+# element path's reasons (handlers/asset_element_telemetry.py).
+LABELLED_APPEND_OUTCOMES = (
+    "inserted", "duplicate", "no_label_record", "label_record_unlabelled")
+LABEL_COLUMNS = ("originator_nation", "releasable_to")
 
 
 ELEMENT_STATE_COLUMNS = (
@@ -252,10 +264,41 @@ class PostgresPool:
                 raise ValueError(
                     f"Write.revive.at_from {revive.at_from!r} is not a key in row"
                 )
+        if write.labels_from_record is not None:
+            if write.mode != "append":
+                raise ValueError(
+                    "Write.labels_from_record is only valid for mode 'append'")
+            if any(c in write.row for c in LABEL_COLUMNS):
+                raise ValueError(
+                    "Write.labels_from_record rows must not carry "
+                    "originator_nation / releasable_to: the record labels them")
         placeholders = [f"${i + 1}" for i in range(len(cols))]
         col_list = ", ".join(f'"{c}"' for c in cols)
         val_list = ", ".join(placeholders)
         conflict = ", ".join(f'"{c}"' for c in write.key_columns)
+
+        if write.mode == "append" and write.labels_from_record is not None:
+            # One statement, so an outage is retried like any write and no
+            # offset moves past it. The condition is releasability_from's:
+            # a nation labels the row, and a NULL releasable_to is stored
+            # as [] (text[], as in the stack migrations). The three counts
+            # say which outcome it was: no record, unlabelled record,
+            # inserted, or (record labelled, nothing inserted) a replay.
+            asset_param = f"${len(cols) + 1}"
+            return (
+                "WITH lab AS (SELECT originator_nation, releasable_to "
+                f'FROM "telemetry_latest_state" WHERE "asset_id" = {asset_param}), '
+                f'ins AS (INSERT INTO "{write.table}" ({col_list}, '
+                '"originator_nation", "releasable_to") '
+                f"SELECT {val_list}, lab.originator_nation, "
+                "COALESCE(lab.releasable_to, '{}'::text[]) FROM lab "
+                "WHERE COALESCE(lab.originator_nation, '') <> '' "
+                f"ON CONFLICT ({conflict}) DO NOTHING RETURNING 1) "
+                "SELECT (SELECT count(*) FROM lab) AS lab_rows, "
+                "(SELECT count(*) FROM lab "
+                "WHERE COALESCE(originator_nation, '') <> '') AS labelled_rows, "
+                "(SELECT count(*) FROM ins) AS inserted_rows"
+            )
 
         if write.mode == "append":
             # A replayed CloudEvent (same id) is a harmless no-op.
@@ -331,17 +374,33 @@ class PostgresPool:
         if write.revive is not None:
             values.extend(write.revive.from_values)
             values.append(write.revive.to_value)
+        if write.labels_from_record is not None:
+            values.append(write.labels_from_record)
         return values
+
+    @staticmethod
+    def labelled_append_outcome(lab_rows: int, labelled_rows: int,
+                                inserted_rows: int) -> str:
+        """The labelled append's three counts -> one of
+        LABELLED_APPEND_OUTCOMES. Pure."""
+        if lab_rows == 0:
+            return "no_label_record"
+        if labelled_rows == 0:
+            return "label_record_unlabelled"
+        return "inserted" if inserted_rows else "duplicate"
 
     # -- execution ----------------------------------------------------------
 
-    async def execute(self, write: Write) -> int | None:
+    async def execute(self, write: Write) -> int | str | None:
         """Execute a Write, retrying on transient failure until it succeeds.
 
         Returns the rows-affected count for mode "update" (asyncpg's status
         string, e.g. "UPDATE 0" / "UPDATE 1", parsed the same way
         `prune_older_than` and `sweep_reporting_staleness` already parse
-        their own DELETE/UPDATE counts). Other modes are unchanged: no
+        their own DELETE/UPDATE counts). A labelled append
+        (`labels_from_record`) returns one of LABELLED_APPEND_OUTCOMES; a
+        store outage is retried here like any write, so a refusal is only
+        ever the record's answer. Other modes are unchanged: no
         caller of "upsert"/"append" reads a return value today, so this
         stays None for them rather than guessing at a meaning.
         """
@@ -352,6 +411,10 @@ class PostgresPool:
         attempt = 0
         while True:
             try:
+                if write.labels_from_record is not None:
+                    async with self._pool.acquire() as conn:
+                        rec = await conn.fetchrow(sql, *values)
+                    return self.labelled_append_outcome(rec[0], rec[1], rec[2])
                 async with self._pool.acquire() as conn:
                     result = await conn.execute(sql, *values)
                 if write.mode == "update":

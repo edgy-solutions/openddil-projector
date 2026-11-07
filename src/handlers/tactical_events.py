@@ -7,6 +7,12 @@ background pruner (see main.py) deletes rows older than retention_hours.
 `severity` is not a CloudEvents context attribute; producers put it inside
 `data`. We extract it best-effort so the UI can filter the feed without
 parsing `data` itself.
+
+Labels are carried in `data` (ADR-0029 §3), except for the element band
+types: those are labelled here, at each tier, from the tier's own label
+record (telemetry_latest_state), because the producer at the edge cannot
+know each tier's record. With no labelled record the row is refused and
+counted (see main.py), never written unlabelled.
 """
 from __future__ import annotations
 
@@ -18,6 +24,12 @@ from .base import (parse_timestamp, refuse_row, releasability_from,
                    resolve_provenance_from_top_level)
 
 TABLE = "tactical_events"
+
+# Element band events: labelled at the tier from its record, not from `data`.
+RECORD_LABELLED_TYPES = frozenset({
+    "openddil.element.band",
+    "openddil.element.bandcount",
+})
 
 
 # Keys, in priority order, that a producer might use to express "how bad is
@@ -74,6 +86,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
                    f"type={decoded.get('type', '?')} id={event_id}")
         return None
     data = decoded.get("data") if isinstance(decoded.get("data"), dict) else {}
+    labelled_at_tier = decoded.get("type") in RECORD_LABELLED_TYPES
     row = {
         "id": event_id,
         **resolve_provenance_from_top_level(data, asset_subject, "tactical_events"),
@@ -96,7 +109,11 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         # direction: a visible alert about an asset the viewer may not see
         # is the leak, and an invisible one is a gap the completeness gate
         # counts.
-        **releasability_from(data),
+        #
+        # The band types are the exception: the edge producer cannot know
+        # each tier's record, so the write takes the labels from this tier's
+        # record (Write.labels_from_record) and `data`'s are ignored.
+        **({} if labelled_at_tier else releasability_from(data)),
         "severity": _extract_severity(decoded),
         "time": parse_timestamp(decoded.get("time")),
         "data": decoded.get("data", {}),
@@ -109,4 +126,5 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         key_columns=["id"],
         row=row,
         jsonb_columns={"data"},
+        labels_from_record=asset_subject if labelled_at_tier else None,
     )

@@ -47,7 +47,9 @@ from handlers.asset_element_telemetry import (
     configure as configure_element_state,
 )
 from link_monitor import link_monitor_enabled, link_monitor_loop
+from handlers.base import refuse_row
 from metrics import (
+    BAND_ROWS_REFUSED,
     DECODE_ERRORS,
     MESSAGES_CONSUMED,
     POSTGRES_ERRORS,
@@ -215,6 +217,14 @@ class ConsumerWorker:
             # written.
             log.info("removal for unknown asset %s dropped", key)
             REMOVAL_UNKNOWN_ASSET_DROPPED.labels(table=write.table).inc()
+            return
+        if rows_affected in ("no_label_record", "label_record_unlabelled"):
+            # A record-labelled row this tier cannot label: refused, counted,
+            # not a UPSERT. refuse_row rate-limits its own WARN.
+            row_type = write.row.get("type", "")
+            BAND_ROWS_REFUSED.labels(type=row_type, reason=rows_affected).inc()
+            refuse_row(write.table, rows_affected,
+                       f"type={row_type} subject={write.labels_from_record}")
             return
         UPSERTS.labels(table=write.table).inc()
 

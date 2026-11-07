@@ -561,6 +561,33 @@ def test_tactical_events_still_writes_when_subject_is_resolvable():
     assert write.row["subject"] == "SUBJ-ASSET"
 
 
+def _labelled_event(event_type):
+    return {"id": f"ce-{event_type}", "source": "/openddil/faust-edge",
+            "type": event_type, "subject": "asset-a",
+            "time": "2026-11-07T03:00:00Z",
+            "data": {"originator_nation": "ATL", "releasable_to": ["BDR"],
+                     "edge_id": "edge-a", "region_id": "region-a"}}
+
+
+def test_tactical_events_band_types_take_labels_from_the_tier_record():
+    # A nation in `data` is ignored: the tier's record labels the row.
+    for event_type in ("openddil.element.band", "openddil.element.bandcount"):
+        write = get_handler("tactical_events")("asset-a", _labelled_event(event_type))
+        assert write is not None
+        assert write.labels_from_record == "asset-a"
+        assert "originator_nation" not in write.row
+        assert "releasable_to" not in write.row
+
+
+def test_tactical_events_other_types_keep_the_carried_label():
+    event = _labelled_event("openddil.logistics.v1.severity-transition")
+    write = get_handler("tactical_events")("asset-a", event)
+    assert write is not None
+    assert write.labels_from_record is None
+    assert write.row["originator_nation"] == "ATL"
+    assert write.row["releasable_to"] == ["BDR"]
+
+
 # -- telemetry_windows --------------------------------------------------------
 
 def test_telemetry_windows_renames_wear_trends_column():
