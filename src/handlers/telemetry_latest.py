@@ -39,22 +39,32 @@ A write is returned (and the per-asset cache refreshed) when any of these
 holds: no cache entry (cold start, or the status-only branch dropped it); an
 operational_status claim; a `deactivated` -> `operational` revive would
 apply; the fingerprint differs; the position moved at least the deadband; or
-the cached write is at least H old. The fingerprint is the row minus the
-four freshness/status stamps, `provenance.sample_time` and
-`kinematics.position`, so every other provenance and kinematics field counts,
-exactly.
+the cached write is at least H old.
+
+The fingerprint is the row minus the four freshness/status stamps,
+`provenance.sample_time` and `provenance.ingest_time` (both move on every
+message), and the motion leaves of `kinematics`: `position.ecef`,
+`position.valid_at`, any lat/lon on `position` or inside `position.wgs84`,
+all of `velocity` and `attitude.euler`. Velocity and yaw are the same motion
+as the position, so they are written whenever the position is and at the
+latest on the heartbeat: under the deadband they can lag by up to H.
+Everything else counts, exactly: `position.quality`, `attitude.reference`,
+the rest of `wgs84` (altitude), any other kinematics or provenance key.
 
 TELEMETRY_CHANGE_ONLY_HEARTBEAT_S must be at most half of
 reporting_sweep.STALE_AFTER_S (ValueError otherwise): while an asset reports
 with inter-message gap G, the stored last_sample_at is at most H + G old, and
 the sweep flips it at STALE_AFTER_S. TELEMETRY_POSITION_DEADBAND_M is a JSON
 object of metres per platform_variant, with an optional "*" fallback; an
-unknown variant with no "*" compares exactly. Distance is horizontal
-great-circle only. No altitude field is read, because none is read anywhere
-else in this service and its shape cannot be relied on here; instead every
-part of `position` other than latitude/longitude (altitude included) is
-compared exactly, so a vertical move is never suppressed. If either side has
-no lat/lon, `position` is compared exactly.
+unknown variant with no "*" compares exactly. Distance, from the last
+written position (so slow drift still writes once it accumulates past the
+deadband): 3-D Euclidean metres over `position.ecef.{x,y,z}.value` when both
+sides have all three with unit "m" or none; else great-circle metres from
+lat/lon; else an exact compare of `position` without `valid_at`. A deadband
+of 0 also takes the exact compare, so a re-stamped valid_at alone never
+counts as movement. The suppression metric reads `unchanged` when position
+(without valid_at), velocity and attitude all equal the last written ones,
+and `deadband` otherwise.
 
 Ordering caveat: the cache is filled when the Write is returned, not after
 Postgres accepts it. A non-retryable write error (main.py logs and skips)
@@ -65,6 +75,7 @@ The cache is in-process, keyed by asset_id and cold after a restart.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -102,6 +113,7 @@ class _Cached:
     position: Any
     at: datetime
     op_status: Optional[str]
+    motion: str
 
 
 # asset_id -> what the last full-row Write this process returned carried.
@@ -151,44 +163,90 @@ def configure() -> None:
 configure()
 
 
+_LATLON_KEYS = ("lat", "lon", "latitude", "longitude")
+
+
+def _strip_latlon(d: Any) -> Any:
+    return ({k: v for k, v in d.items() if k not in _LATLON_KEYS}
+            if isinstance(d, dict) else d)
+
+
 def _fingerprint(row: dict[str, Any]) -> str:
     fp = {k: v for k, v in row.items() if k not in _FRESHNESS_COLUMNS}
     prov = fp.get("provenance")
     if isinstance(prov, dict):
-        fp["provenance"] = {k: v for k, v in prov.items() if k != "sample_time"}
+        fp["provenance"] = {k: v for k, v in prov.items()
+                            if k not in ("sample_time", "ingest_time")}
     kin = fp.get("kinematics")
     if isinstance(kin, dict):
-        fp["kinematics"] = {k: v for k, v in kin.items() if k != "position"}
+        kin = {k: v for k, v in kin.items() if k != "velocity"}
+        att = kin.get("attitude")
+        if isinstance(att, dict):
+            kin["attitude"] = {k: v for k, v in att.items() if k != "euler"}
+        pos = kin.get("position")
+        if isinstance(pos, dict):
+            # Only the motion leaves leave; quality and any other key stay,
+            # and so does whatever sits beside lat/lon inside wgs84 (altitude).
+            pos = {k: v for k, v in pos.items()
+                   if k not in ("ecef", "valid_at", "wgs84")
+                   and k not in _LATLON_KEYS}
+            if isinstance(kin["position"].get("wgs84"), dict):
+                pos["wgs84"] = _strip_latlon(kin["position"]["wgs84"])
+            kin["position"] = pos
+        fp["kinematics"] = kin
     return json.dumps(fp, sort_keys=True, default=str)
 
 
-def _position_residual(position: Any) -> Any:
-    """Everything in `position` that is not latitude/longitude (altitude and
-    any sibling field), compared exactly alongside the horizontal distance."""
+def _motion(kin: Any) -> str:
+    """Position (minus valid_at), velocity and attitude, canonical. Equal to
+    the last written one means the message carried no motion at all."""
+    if not isinstance(kin, dict):
+        return "null"
+    pos = kin.get("position")
+    if isinstance(pos, dict):
+        pos = {k: v for k, v in pos.items() if k != "valid_at"}
+    return json.dumps([pos, kin.get("velocity"), kin.get("attitude")],
+                      sort_keys=True, default=str)
+
+
+def _ecef_m(position: Any) -> Optional[tuple[float, float, float]]:
+    if not isinstance(position, dict):
+        return None
+    ecef = position.get("ecef")
+    if not isinstance(ecef, dict):
+        return None
+    out = []
+    for axis in ("x", "y", "z"):
+        q = ecef.get(axis)
+        if not isinstance(q, dict) or q.get("unit", "m") != "m":
+            return None
+        v = q.get("value")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        out.append(float(v))
+    return (out[0], out[1], out[2])
+
+
+def _position_no_stamp(position: Any) -> Any:
     if not isinstance(position, dict):
         return position
-    horiz = ("lat", "lon", "latitude", "longitude")
-    out = {k: v for k, v in position.items() if k != "wgs84" and k not in horiz}
-    inner = position.get("wgs84")
-    if isinstance(inner, dict):
-        out["wgs84"] = {k: v for k, v in inner.items() if k not in horiz}
-    return out
+    return {k: v for k, v in position.items() if k != "valid_at"}
 
 
 def _moved(old: Any, new: Any, deadband_m: float) -> bool:
-    """True when the position differs by at least the deadband. With no
-    deadband, or no lat/lon on either side, any difference counts."""
-    if old == new:
-        return False
-    if deadband_m <= 0:
-        return True
-    lat0, lon0 = extract_wgs84({"position": old})
-    lat1, lon1 = extract_wgs84({"position": new})
-    if None in (lat0, lon0, lat1, lon1):
-        return True
-    if _position_residual(old) != _position_residual(new):
-        return True
-    return great_circle_km(lat0, lon0, lat1, lon1) * 1000.0 >= deadband_m
+    """True when the position moved at least the deadband from the last
+    written one. Order: 3-D ECEF metres, else great-circle metres, else (and
+    always when the deadband is 0) an exact compare of `position` without its
+    valid_at stamp, which is re-stamped on every message."""
+    if deadband_m > 0:
+        e0, e1 = _ecef_m(old), _ecef_m(new)
+        if e0 is not None and e1 is not None:
+            return math.dist(e0, e1) >= deadband_m
+        lat0, lon0 = extract_wgs84({"position": old})
+        lat1, lon1 = extract_wgs84({"position": new})
+        if None not in (lat0, lon0, lat1, lon1):
+            return great_circle_km(lat0, lon0, lat1, lon1) * 1000.0 >= deadband_m
+    return _position_no_stamp(old) != _position_no_stamp(new)
 
 
 def _change_only(asset_id: str, write: Write, op_status_claim: Optional[str],
@@ -197,6 +255,7 @@ def _change_only(asset_id: str, write: Write, op_status_claim: Optional[str],
     fp = _fingerprint(row)
     kin = row.get("kinematics")
     pos = kin.get("position") if isinstance(kin, dict) else None
+    motion = _motion(kin)
     prev = _cache.get(asset_id)
     revive = write.revive
     revive_applies = (revive is not None and prev is not None
@@ -211,11 +270,11 @@ def _change_only(asset_id: str, write: Write, op_status_claim: Optional[str],
             op_status = op_status_claim
         elif revive_applies:
             op_status = revive.to_value
-        _cache[asset_id] = _Cached(fp, pos, now, op_status)
+        _cache[asset_id] = _Cached(fp, pos, now, op_status, motion)
         return write
     # Suppressed: the fingerprint is equal, so the only possible difference
-    # is a sub-deadband position move (or none at all).
-    reason = "deadband" if prev.position != pos else "unchanged"
+    # is motion under the deadband (or none at all).
+    reason = "unchanged" if prev.motion == motion else "deadband"
     TELEMETRY_WRITES_SUPPRESSED.labels(reason=reason).inc()
     return None
 
