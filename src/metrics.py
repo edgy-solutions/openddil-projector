@@ -181,3 +181,15 @@ def start_metrics_server() -> int:
     port = int(os.getenv("METRICS_PORT", "8084"))
     start_http_server(port)
     return port
+
+# -- telemetry_latest_state (change-only writes) --------------------------------
+# Only incremented when TELEMETRY_CHANGE_ONLY_HEARTBEAT_S is set. `deadband` is
+# the case where the only difference was a position move under the configured
+# metres; `unchanged` is every other suppressed message.
+TELEMETRY_WRITES_SUPPRESSED = Counter(
+    "projector_telemetry_writes_suppressed_total",
+    "telemetry_latest_state writes suppressed because nothing but freshness changed",
+    ["reason"],
+)
+for _reason in ("unchanged", "deadband"):
+    TELEMETRY_WRITES_SUPPRESSED.labels(reason=_reason)

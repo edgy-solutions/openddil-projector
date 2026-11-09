@@ -21,18 +21,64 @@ own coordinated upgrades in 6b. Consequence detectable in monitoring:
 `SELECT DISTINCT edge_id FROM asset_cm_state` will show only the
 projector's env default in 6a regardless of which edge the underlying
 events came from. That is expected partial-state during 6a, not a bug.
+
+Change-only writes (opt-in, off by default). Every full-row write sets
+`provenance` (which carries `sample_time`), `last_sample_at`,
+`reporting_status_at` and `updated_at`, and all four change on every
+message, so every message is an UPDATE. Electric in `replica=default` logs,
+per UPDATE, the key plus the changed columns (source-verified for 1.6.2,
+`LogItems.from_change`), so an asset that has not changed still costs one
+shape-log entry per message per shape. With TELEMETRY_CHANGE_ONLY_HEARTBEAT_S
+> 0 this handler returns None for a message that changes nothing but
+freshness, and refreshes freshness on a heartbeat instead. Writing a column
+subset is deliberately not done: Electric already logs only the changed
+columns, and a partial upsert could recreate a reset- or prune-deleted row
+with NULL identity and kinematics.
+
+A write is returned (and the per-asset cache refreshed) when any of these
+holds: no cache entry (cold start, or the status-only branch dropped it); an
+operational_status claim; a `deactivated` -> `operational` revive would
+apply; the fingerprint differs; the position moved at least the deadband; or
+the cached write is at least H old. The fingerprint is the row minus the
+four freshness/status stamps, `provenance.sample_time` and
+`kinematics.position`, so every other provenance and kinematics field counts,
+exactly.
+
+TELEMETRY_CHANGE_ONLY_HEARTBEAT_S must be at most half of
+reporting_sweep.STALE_AFTER_S (ValueError otherwise): while an asset reports
+with inter-message gap G, the stored last_sample_at is at most H + G old, and
+the sweep flips it at STALE_AFTER_S. TELEMETRY_POSITION_DEADBAND_M is a JSON
+object of metres per platform_variant, with an optional "*" fallback; an
+unknown variant with no "*" compares exactly. Distance is horizontal
+great-circle only. No altitude field is read, because none is read anywhere
+else in this service and its shape cannot be relied on here; instead every
+part of `position` other than latitude/longitude (altitude included) is
+compared exactly, so a vertical move is never suppressed. If either side has
+no lat/lon, `position` is compared exactly.
+
+Ordering caveat: the cache is filled when the Write is returned, not after
+Postgres accepts it. A non-retryable write error (main.py logs and skips)
+leaves the store behind the cache until the next heartbeat. That bound, H, is
+also the stated bound for a reset- or prune-deleted row: it reappears within H.
+The cache is in-process, keyed by asset_id and cold after a restart.
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Optional
 
-from edge_assignment import extract_wgs84
+import reporting_sweep
+from edge_assignment import extract_wgs84, great_circle_km
 from lifecycle_status import (OPERATIONAL_STATUS_DEACTIVATED,
                                OPERATIONAL_STATUS_DESTROYED,
                                OPERATIONAL_STATUS_OPERATIONAL,
                                OPERATIONAL_STATUS_REMOVED,
                                is_dis_destroyed_signal,
                                operational_status_from_op_state)
+from metrics import TELEMETRY_WRITES_SUPPRESSED
 from persistence import Revive, Write
 
 from .base import (now_utc, parse_timestamp, releasability_from,
@@ -41,6 +87,137 @@ from .base import (now_utc, parse_timestamp, releasability_from,
 TABLE = "telemetry_latest_state"
 
 _POSTURE_STATUS_PREFIX = "POSTURE_STATUS_"
+
+# Columns that move on every message without the asset having changed.
+_FRESHNESS_COLUMNS = ("last_sample_at", "reporting_status_at", "updated_at",
+                      "operational_status_at")
+
+_heartbeat_s = 0.0
+_deadband_m: dict[str, float] = {}
+
+
+@dataclass
+class _Cached:
+    fingerprint: str
+    position: Any
+    at: datetime
+    op_status: Optional[str]
+
+
+# asset_id -> what the last full-row Write this process returned carried.
+_cache: dict[str, _Cached] = {}
+
+
+def configure() -> None:
+    """(Re)read the change-only env. Called at import; tests call it again
+    after monkeypatching the environment. Raises ValueError on a bad value so
+    a misconfigured deployment fails at startup, not on the first message."""
+    global _heartbeat_s, _deadband_m
+    raw_h = os.getenv("TELEMETRY_CHANGE_ONLY_HEARTBEAT_S", "0")
+    try:
+        heartbeat = float(raw_h)
+    except ValueError:
+        raise ValueError(
+            f"TELEMETRY_CHANGE_ONLY_HEARTBEAT_S={raw_h!r} is not a number")
+    if heartbeat < 0:
+        raise ValueError(
+            f"TELEMETRY_CHANGE_ONLY_HEARTBEAT_S={heartbeat} is negative")
+    stale = reporting_sweep.STALE_AFTER_S
+    if heartbeat > stale / 2:
+        raise ValueError(
+            f"TELEMETRY_CHANGE_ONLY_HEARTBEAT_S={heartbeat} exceeds half of "
+            f"REPORTING_STALE_AFTER_S={stale}: a reporting asset's stored "
+            f"last_sample_at could go stale before the next heartbeat")
+    raw_d = os.getenv("TELEMETRY_POSITION_DEADBAND_M", "{}")
+    try:
+        parsed = json.loads(raw_d)
+    except ValueError as exc:
+        raise ValueError(f"TELEMETRY_POSITION_DEADBAND_M is not JSON: {exc}")
+    if not isinstance(parsed, dict):
+        raise ValueError("TELEMETRY_POSITION_DEADBAND_M must be a JSON object")
+    deadband: dict[str, float] = {}
+    for variant, metres in parsed.items():
+        if isinstance(metres, bool) or not isinstance(metres, (int, float)):
+            raise ValueError(
+                f"TELEMETRY_POSITION_DEADBAND_M[{variant!r}] is not a number")
+        if metres < 0:
+            raise ValueError(
+                f"TELEMETRY_POSITION_DEADBAND_M[{variant!r}]={metres} is negative")
+        deadband[str(variant)] = float(metres)
+    _heartbeat_s = heartbeat
+    _deadband_m = deadband
+
+
+configure()
+
+
+def _fingerprint(row: dict[str, Any]) -> str:
+    fp = {k: v for k, v in row.items() if k not in _FRESHNESS_COLUMNS}
+    prov = fp.get("provenance")
+    if isinstance(prov, dict):
+        fp["provenance"] = {k: v for k, v in prov.items() if k != "sample_time"}
+    kin = fp.get("kinematics")
+    if isinstance(kin, dict):
+        fp["kinematics"] = {k: v for k, v in kin.items() if k != "position"}
+    return json.dumps(fp, sort_keys=True, default=str)
+
+
+def _position_residual(position: Any) -> Any:
+    """Everything in `position` that is not latitude/longitude (altitude and
+    any sibling field), compared exactly alongside the horizontal distance."""
+    if not isinstance(position, dict):
+        return position
+    horiz = ("lat", "lon", "latitude", "longitude")
+    out = {k: v for k, v in position.items() if k != "wgs84" and k not in horiz}
+    inner = position.get("wgs84")
+    if isinstance(inner, dict):
+        out["wgs84"] = {k: v for k, v in inner.items() if k not in horiz}
+    return out
+
+
+def _moved(old: Any, new: Any, deadband_m: float) -> bool:
+    """True when the position differs by at least the deadband. With no
+    deadband, or no lat/lon on either side, any difference counts."""
+    if old == new:
+        return False
+    if deadband_m <= 0:
+        return True
+    lat0, lon0 = extract_wgs84({"position": old})
+    lat1, lon1 = extract_wgs84({"position": new})
+    if None in (lat0, lon0, lat1, lon1):
+        return True
+    if _position_residual(old) != _position_residual(new):
+        return True
+    return great_circle_km(lat0, lon0, lat1, lon1) * 1000.0 >= deadband_m
+
+
+def _change_only(asset_id: str, write: Write, op_status_claim: Optional[str],
+                 variant: Optional[str], now: datetime) -> Write | None:
+    row = write.row
+    fp = _fingerprint(row)
+    kin = row.get("kinematics")
+    pos = kin.get("position") if isinstance(kin, dict) else None
+    prev = _cache.get(asset_id)
+    revive = write.revive
+    revive_applies = (revive is not None and prev is not None
+                      and prev.op_status in revive.from_values)
+    deadband = _deadband_m.get(variant or "", _deadband_m.get("*", 0.0))
+    if (prev is None or op_status_claim is not None or revive_applies
+            or prev.fingerprint != fp
+            or (now - prev.at).total_seconds() >= _heartbeat_s
+            or _moved(prev.position, pos, deadband)):
+        op_status = prev.op_status if prev is not None else None
+        if op_status_claim is not None:
+            op_status = op_status_claim
+        elif revive_applies:
+            op_status = revive.to_value
+        _cache[asset_id] = _Cached(fp, pos, now, op_status)
+        return write
+    # Suppressed: the fingerprint is equal, so the only possible difference
+    # is a sub-deadband position move (or none at all).
+    reason = "deadband" if prev.position != pos else "unchanged"
+    TELEMETRY_WRITES_SUPPRESSED.labels(reason=reason).inc()
+    return None
 
 
 def _posture_status_value(op_state: dict[str, Any]) -> str:
@@ -127,6 +304,10 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
     # "operational status is owned" by whoever received the actual signal,
     # not invented by whoever relays it) that never claimed to know them.
     if not kinematics and field_claim:
+        # Change-only: this write moves operational_status without the row's
+        # other columns, so what the cache fingerprinted no longer describes
+        # the stored row. Drop it; the next full row writes.
+        _cache.pop(asset_id, None)
         status_only_row = {
             "asset_id": asset_id,
             **origin,
@@ -237,7 +418,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
             at_from="updated_at",
         )
 
-    return Write(
+    write = Write(
         table=TABLE,
         mode="upsert",
         key_columns=["asset_id"],
@@ -245,3 +426,7 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         jsonb_columns={"kinematics", "sustainment", "provenance"},
         revive=revive,
     )
+    if _heartbeat_s > 0:
+        return _change_only(asset_id, write, op_status_claim,
+                            asset.get("platform_variant"), now)
+    return write
