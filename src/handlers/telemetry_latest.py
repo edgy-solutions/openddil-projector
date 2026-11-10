@@ -56,7 +56,10 @@ reporting_sweep.STALE_AFTER_S (ValueError otherwise): while an asset reports
 with inter-message gap G, the stored last_sample_at is at most H + G old, and
 the sweep flips it at STALE_AFTER_S. TELEMETRY_POSITION_DEADBAND_M is a JSON
 object of metres per platform_variant, with an optional "*" fallback; an
-unknown variant with no "*" compares exactly. Distance, from the last
+unknown variant with no "*" compares exactly. The chart builds it from
+movement.standards.<variant>.positionDeadbandM, with "*" from
+movement.positionDeadbandDefaultM, and sets both values only when its
+projector.telemetryChangeOnly.heartbeatS is above 0. Distance, from the last
 written position (so slow drift still writes once it accumulates past the
 deadband): 3-D Euclidean metres over `position.ecef.{x,y,z}.value` when both
 sides have all three with unit "m" or none; else great-circle metres from
