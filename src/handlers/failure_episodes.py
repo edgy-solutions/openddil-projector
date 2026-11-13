@@ -58,7 +58,8 @@ def handle(key: str, decoded: dict[str, Any]) -> Write | None:
         return None
     releasable = decoded.get("releasable_to")
     if releasable is None:
-        releasable = []
+        refuse_row(LABEL, "missing_releasable_to", f"episode_id={episode_id!r}")
+        return None
     if not isinstance(releasable, list):
         refuse_row(LABEL, "bad_releasable_to", f"releasable_to={releasable!r}")
         return None

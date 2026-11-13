@@ -183,6 +183,8 @@ def test_blank_region_is_null():
     (lambda r: r.pop("asset_id"), "missing_asset_id"),
     (lambda r: r.update(originator_nation=""), "unlabelled"),
     (lambda r: r.update(releasable_to="BDR"), "bad_releasable_to"),
+    (lambda r: r.pop("releasable_to"), "missing_releasable_to"),
+    (lambda r: r.update(releasable_to=None), "missing_releasable_to"),
 ])
 def test_refusals_counted(mutate, reason):
     name = f"failure_episodes:{reason}"
