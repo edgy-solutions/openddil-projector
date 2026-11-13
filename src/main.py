@@ -133,13 +133,18 @@ class ConsumerWorker:
 
     def _drain_batch(self) -> list[Any]:
         """Blocking — collect up to BATCH_MAX_MESSAGES, or whatever arrives
-        within BATCH_MAX_WAIT_MS. Runs in an executor thread."""
+        within BATCH_MAX_WAIT_MS. Runs in an executor thread.
+
+        A full batch stops polling, so no polled message is ever left
+        unprocessed (the consumer has already moved past it)."""
         batch: list[Any] = []
         # First poll waits up to the full window; subsequent polls are
         # near-instant to scoop whatever else is already buffered.
         msg = self._consumer.poll(BATCH_MAX_WAIT_MS / 1000.0)
-        while msg is not None and len(batch) < BATCH_MAX_MESSAGES:
+        while msg is not None:
             batch.append(msg)
+            if len(batch) >= BATCH_MAX_MESSAGES:
+                break
             msg = self._consumer.poll(0)
         return batch
 
