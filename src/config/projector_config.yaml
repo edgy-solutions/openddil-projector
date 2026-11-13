@@ -138,6 +138,16 @@ mappings:
     decode_as: json
     mode: upsert
 
+  # failure-episodes: closed manual-discrepancy episodes (ADR-0051). A durable
+  # record, never pruned: deliberately no asset_ttl_hours, and config.py
+  # (NEVER_PRUNED_TABLES) refuses one and ignores the TTL env override.
+  - topic: failure-episodes
+    handler: failure_episodes
+    table: failure_episodes
+    consumer_group: projector-failure-episodes
+    decode_as: json
+    mode: upsert
+
   - topic: asset-declarations
     handler: asset_correlation
     table: asset_correlation

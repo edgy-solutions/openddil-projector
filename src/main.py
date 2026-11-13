@@ -28,7 +28,7 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, TopicPartition
 
-from config import Config, Mapping, load_config
+from config import NEVER_PRUNED_TABLES, Config, Mapping, load_config
 from edge_assignment import configure_from_config as configure_edge_assignment
 from decoders import (
     DecodeError,
@@ -332,6 +332,7 @@ def build_prune_targets(
         (m.table, "time", m.retention_hours, False)
         for m in mappings
         if m.mode == "append" and m.retention_hours
+        and m.table not in NEVER_PRUNED_TABLES
     ]
     upsert_tables = [
         (m.table, "updated_at", m.asset_ttl_hours,
@@ -340,6 +341,7 @@ def build_prune_targets(
         if (m.mode == "upsert"
             or (m.mode == "custom" and m.table in CUSTOM_PRUNED_TABLES))
         and m.asset_ttl_hours
+        and m.table not in NEVER_PRUNED_TABLES
     ]
     # Dependents-before-lifecycle-table within the upsert group (see
     # prune_loop's docstring). Stable sort: only telemetry_latest_state's

@@ -21,6 +21,7 @@ from . import (
     capability_state,
     cm_state,
     effector_launch,
+    failure_episodes,
     logistics_status,
     munition_track,
     parts_availability,
@@ -58,6 +59,8 @@ _REGISTRY: dict[str, Handler] = {
     "munition_track": munition_track.handle,
     # ADR-0050 declare-and-expect; pure upserts, never pruned.
     "asset_declaration": asset_declaration.handle,
+    # ADR-0051 closed failure episodes; durable, upsert on (episode_id, detected_at).
+    "failure_episodes": failure_episodes.handle,
     "asset_correlation": asset_correlation.handle,
     "asset_fielding": asset_fielding.handle,
 }

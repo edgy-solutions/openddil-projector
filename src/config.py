@@ -14,6 +14,12 @@ from edge_assignment import load_yaml_no_duplicate_keys
 
 DEFAULT_CONFIG_PATH = "/app/src/config/projector_config.yaml"
 
+# Durable records: never pruned, by code. A mapping on one of these tables
+# takes no TTL from the PROJECTOR_ASSET_TTL_HOURS override, a yaml
+# asset_ttl_hours on it is a load error, and build_prune_targets (main.py)
+# never returns it.
+NEVER_PRUNED_TABLES = frozenset({"failure_episodes"})
+
 
 @dataclass(frozen=True)
 class Mapping:
@@ -110,10 +116,17 @@ def load_config(path: Path | None = None) -> Config:
                 f"positive asset_ttl_hours (got mode={mode!r}, "
                 f"asset_ttl_hours={asset_ttl!r})"
             )
+        if entry["table"] in NEVER_PRUNED_TABLES and asset_ttl is not None:
+            raise ValueError(
+                f"mapping for topic {entry['topic']!r}: table "
+                f"{entry['table']!r} is a durable record and is never "
+                f"pruned; asset_ttl_hours={asset_ttl!r} is not allowed"
+            )
         # A custom mapping that declares its own asset_ttl_hours is pruned
         # like an upsert one (asset_element_telemetry); other custom
         # mappings never take a TTL from the env.
         if ((mode == "upsert" or (mode == "custom" and asset_ttl))
+                and entry["table"] not in NEVER_PRUNED_TABLES
                 and env_ttl_override is not None):
             # 0 disables; positive value overrides whatever yaml said.
             asset_ttl = env_ttl_override if env_ttl_override > 0 else None
