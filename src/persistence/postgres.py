@@ -450,6 +450,16 @@ class PostgresPool:
 
         await self._retrying("upsert_failure_episode_withheld", op)
 
+    async def fetch_label_policy_id(self) -> str | None:
+        """The active label policy id (DESIGN-2026-11-06 section 1.1), or None
+        when the label_policy table does not exist yet or has no row."""
+        async def op(conn: Any) -> str | None:
+            if await conn.fetchval("SELECT to_regclass('public.label_policy')") is None:
+                return None
+            return await conn.fetchval("SELECT policy_id FROM label_policy")
+
+        return await self._retrying("fetch_label_policy_id", op)
+
     async def insert_failure_episode(self, row: dict[str, Any]) -> str:
         """First write wins. Returns "inserted", "duplicate" (a row with this
         key and the same body_sha256 exists) or "conflict" (same key, other

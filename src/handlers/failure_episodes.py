@@ -28,6 +28,7 @@ from typing import Any
 from metrics import FAILURE_EPISODE_WRITES
 from persistence import PostgresPool
 from persistence.postgres import PostgresWriteError
+from vendor.openddil_labels.lk1 import compile_lk1
 
 from .base import _REFUSE_WARN_WINDOW_S, now_utc, refuse_row
 
@@ -66,6 +67,15 @@ def _note_conflict(episode_id: str, stored: str, new: str) -> None:
                     "different body (stored %.12s.. new %.12s..); stored row "
                     "untouched", episode_id, stored, new)
         _conflict_last_warn[episode_id] = now
+
+
+async def _label_policy_id(pool: PostgresPool) -> str | None:
+    """Asked once per process and cached on the pool. A policy change is a
+    DESIGN-2026-11-06 section 1.4 backfill, not a re-read here."""
+    if not getattr(pool, "_label_policy_loaded", False):
+        pool._label_policy_id = await pool.fetch_label_policy_id()
+        pool._label_policy_loaded = True
+    return pool._label_policy_id
 
 
 async def withhold(pool: PostgresPool, decoded: Any, stage: str, reason: str, *,
@@ -126,6 +136,12 @@ async def handle(key: str, decoded: dict[str, Any], pool: PostgresPool) -> None:
         await _refuse(pool, decoded, "bad_releasable_to",
                       f"releasable_to={releasable!r}")
         return
+    # lk1 key and body, compiled at write from the pinned openddil_labels.
+    # None, None when there is no label_policy row. An unlabelled close was
+    # refused above, so the originator is non-empty here.
+    compiled = compile_lk1(await _label_policy_id(pool),
+                           decoded["originator_nation"], releasable)
+    label_key, label = compiled if compiled is not None else (None, None)
     row: dict[str, Any] = {
         "episode_id": episode_id,
         "detected_at": detected_at,
@@ -140,6 +156,8 @@ async def handle(key: str, decoded: dict[str, Any], pool: PostgresPool) -> None:
         "mod_compliance": decoded.get("mod_compliance") or [],
         "originator_nation": decoded["originator_nation"],
         "releasable_to": [str(r) for r in releasable],
+        "label_key": label_key,
+        "label": label,
         "edge_id": decoded.get("edge_id") or "",
         "region_id": decoded.get("region_id") or None,
         "body_sha256": body_sha256(decoded),

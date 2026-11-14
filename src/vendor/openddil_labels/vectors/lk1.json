@@ -1,0 +1,288 @@
+[
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|~",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": null
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:b16d5752689c20ed70efc48b623d49bf02c8871e2d07c069dbb87ca61eecb569",
+    "name": "atl_absent",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": null
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": []
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:c0625e22f7f9ad2c83ad6e82f23dd66237cfccabd06213e1f9251436bd1b244a",
+    "name": "atl_empty",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": []
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|BDR",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": [
+            "BDR"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:f02cd2ad668e692dc6ee63b3e98b1c1e7cf4f9397fd7cb56e6132be3edf9aa08",
+    "name": "atl_bdr",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "BDR"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|ATL,BDR",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": [
+            "ATL",
+            "BDR"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:8ab8249aad14cd3b72ce4c357472eb920918da8c5b035218b101b22fa722581d",
+    "name": "atl_bdr_atl",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "BDR",
+      "ATL"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|ATL,BDR",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": [
+            "ATL",
+            "BDR"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:8ab8249aad14cd3b72ce4c357472eb920918da8c5b035218b101b22fa722581d",
+    "name": "atl_atl_bdr_atl",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "ATL",
+      "BDR",
+      "ATL"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|BDR,CRD",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": [
+            "BDR",
+            "CRD"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:8745a6353cde3bb94427aee1981ac386c7ca99341d6f8f19979406a6f5f3dddf",
+    "name": "atl_bdr_crd",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "BDR",
+      "CRD"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|ATL|BDR,CRD",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": [
+            "BDR",
+            "CRD"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:8745a6353cde3bb94427aee1981ac386c7ca99341d6f8f19979406a6f5f3dddf",
+    "name": "atl_crd_bdr",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "CRD",
+      "BDR"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-1|nation|BDR|ATL",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "BDR",
+          "release": [
+            "ATL"
+          ]
+        }
+      },
+      "policy": "example:policy-1",
+      "v": 1
+    },
+    "label_key": "lk1:a37600eb10a15ab780ffc455ba378f53c97db5ed6efb0a6b27b2b3456bd67939",
+    "name": "bdr_atl",
+    "originator_nation": "BDR",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "ATL"
+    ]
+  },
+  {
+    "canonical": "lk1|example:policy-2|nation|ATL|~",
+    "label": {
+      "dims": {
+        "nation": {
+          "author": "ATL",
+          "release": null
+        }
+      },
+      "policy": "example:policy-2",
+      "v": 1
+    },
+    "label_key": "lk1:b1bc2db1cdfac7c5dfef443972be77813d711dec131152d321e0b13b112db1dc",
+    "name": "atl_absent_policy_2",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-2",
+    "releasable_to": null
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "no_originator_absent",
+    "originator_nation": null,
+    "policy_id": "example:policy-1",
+    "releasable_to": null
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "no_originator_empty",
+    "originator_nation": null,
+    "policy_id": "example:policy-1",
+    "releasable_to": []
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "empty_originator_bdr",
+    "originator_nation": "",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "BDR"
+    ]
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "lowercase_originator",
+    "originator_nation": "atl",
+    "policy_id": "example:policy-1",
+    "releasable_to": null
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "long_originator",
+    "originator_nation": "ATLX",
+    "policy_id": "example:policy-1",
+    "releasable_to": null
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "release_has_none",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      null
+    ]
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "release_lowercase",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      "bdr"
+    ]
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "release_empty_string",
+    "originator_nation": "ATL",
+    "policy_id": "example:policy-1",
+    "releasable_to": [
+      ""
+    ]
+  },
+  {
+    "canonical": null,
+    "label": null,
+    "label_key": null,
+    "name": "no_policy",
+    "originator_nation": "ATL",
+    "policy_id": null,
+    "releasable_to": [
+      "BDR"
+    ]
+  }
+]

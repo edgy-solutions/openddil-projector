@@ -55,6 +55,8 @@ CREATE TABLE "public"."failure_episodes" (
   "mod_compliance" jsonb NOT NULL DEFAULT '[]',
   "originator_nation" text NOT NULL,
   "releasable_to" text[] NOT NULL,
+  "label_key" text NULL,
+  "label" jsonb NULL,
   "edge_id" text NOT NULL DEFAULT '',
   "region_id" text NULL,
   "body_sha256" text NOT NULL,
@@ -103,6 +105,12 @@ class FakePool:
         self.inserts = 0
         self.withheld: dict[tuple, dict] = {}
         self.raise_on_insert: Exception | None = None
+        self.policy: str | None = None
+        self.policy_reads = 0
+
+    async def fetch_label_policy_id(self) -> str | None:
+        self.policy_reads += 1
+        return self.policy
 
     async def upsert_failure_episode_withheld(self, row: dict) -> None:
         k = (row["body_sha256"], row["stage"], row["reason"])
@@ -144,7 +152,7 @@ def test_golden_is_the_contract_copy():
 
 
 def test_migration_columns_parsed():
-    assert len(MIGRATION_COLUMNS) == 17 and MIGRATION_COLUMNS[0] == "episode_id"
+    assert len(MIGRATION_COLUMNS) == 19 and MIGRATION_COLUMNS[0] == "episode_id"
 
 
 async def test_golden_record_one_write_every_column():
@@ -418,6 +426,124 @@ async def test_withheld_write_failure_raises():
         await handle("k", r, P())
 
 
+# -- lk1 label_key + label at write (S7 change D) ---------------------------
+
+VENDOR = Path(__file__).parent.parent / "vendor" / "openddil_labels"
+VECTORS = json.loads((VENDOR / "vectors" / "lk1.json").read_bytes())
+KEYED = [v for v in VECTORS if v["label_key"] is not None]
+
+
+def test_vendored_labels_match_their_pin():
+    lines = (VENDOR / "PIN").read_text().splitlines()
+    assert len(lines) == 3
+    assert "openddil-contracts" in lines[0] and "0552b81" in lines[0]
+    for line, rel in ((lines[1], "lk1.py"), (lines[2], "vectors/lk1.json")):
+        name, sha = line.split()
+        assert name == rel
+        assert hashlib.sha256((VENDOR / rel).read_bytes()).hexdigest() == sha
+
+
+def test_vendored_vectors_equal_the_vendored_generator():
+    from vendor.openddil_labels import lk1
+    assert lk1.generate_vectors() == VECTORS
+
+
+async def _labelled(policy, nation, release) -> dict:
+    r = golden()
+    r["originator_nation"] = nation
+    if release is None:
+        del r["releasable_to"]
+    else:
+        r["releasable_to"] = release
+    p = FakePool()
+    p.policy = policy
+    await handle("k", r, p)
+    return p, r
+
+
+@pytest.mark.parametrize("v", [v for v in KEYED if v["releasable_to"] is not None],
+                         ids=lambda v: v["name"])
+async def test_every_keyed_vector_writes_its_key_and_label(v):
+    p, r = await _labelled(v["policy_id"], v["originator_nation"], v["releasable_to"])
+    assert len(p.rows) == 1, "vector was refused: %s" % list(p.withheld.values())
+    row = next(iter(p.rows.values()))
+    assert row["label_key"] == v["label_key"]
+    assert row["label"] == v["label"]
+    # the hash is still over the wire record, not the label
+    assert row["body_sha256"] == body_sha256(r)
+
+
+async def test_absent_releasable_to_is_refused_not_labelled():
+    # the existing refusal (missing_releasable_to) still fires before any key
+    p, _ = await _labelled("example:policy-1", "ATL", None)
+    assert not p.rows and len(p.withheld) == 1
+    assert next(iter(p.withheld.values()))["reason"] == "missing_releasable_to"
+
+
+async def test_no_policy_writes_null_key_and_label_and_still_inserts():
+    i0 = outcome_count("inserted")
+    p, _ = await _labelled(None, "ATL", ["BDR"])
+    row = next(iter(p.rows.values()))
+    assert row["label_key"] is None and row["label"] is None
+    assert outcome_count("inserted") == i0 + 1
+
+
+async def test_declared_empty_and_set_semantics_give_the_vector_keys():
+    by = {v["name"]: v for v in VECTORS}
+    p, _ = await _labelled("example:policy-1", "ATL", [])
+    assert next(iter(p.rows.values()))["label_key"] == by["atl_empty"]["label_key"]
+    p2, _ = await _labelled("example:policy-1", "ATL", ["BDR", "ATL", "BDR"])
+    k2 = next(iter(p2.rows.values()))["label_key"]
+    assert k2 == by["atl_bdr_atl"]["label_key"]
+    p3, _ = await _labelled("example:policy-1", "ATL", ["ATL", "BDR", "ATL"])
+    assert next(iter(p3.rows.values()))["label_key"] == by["atl_atl_bdr_atl"]["label_key"]
+    assert by["atl_empty"]["label_key"] != by["atl_absent"]["label_key"]
+
+
+async def test_unlabelled_close_is_withheld_and_compile_is_never_reached(monkeypatch):
+    import handlers.failure_episodes as fe
+
+    def boom(*a):
+        raise AssertionError("compile_lk1 reached")
+
+    monkeypatch.setattr(fe, "compile_lk1", boom)
+    r = golden()
+    r["originator_nation"] = ""
+    p = FakePool()
+    p.policy = "example:policy-1"
+    await handle("k", r, p)
+    assert not p.rows and p.inserts == 0
+    assert len(p.withheld) == 1
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("projector", "unlabelled")
+
+
+async def test_policy_is_read_once_per_process_and_cached_on_the_pool():
+    p = FakePool()
+    p.policy = "example:policy-1"
+    for n in range(3):
+        await project(p, rec(n))
+    assert p.policy_reads == 1
+    row = next(iter(p.rows.values()))
+    assert row["label_key"].startswith("lk1:")
+
+
+async def test_fetch_label_policy_id_table_missing_row_missing_and_present():
+    class C:
+        def __init__(self, regclass, policy):
+            self.regclass, self.policy, self.sql = regclass, policy, []
+
+        async def fetchval(self, sql, *a):
+            self.sql.append(sql)
+            return self.regclass if "to_regclass" in sql else self.policy
+
+    c = C(None, "ignored")
+    assert await _pool_over(c).fetch_label_policy_id() is None
+    assert len(c.sql) == 1
+    assert await _pool_over(C("label_policy", None)).fetch_label_policy_id() is None
+    assert await _pool_over(C("label_policy", "example:policy-1")).fetch_label_policy_id() == "example:policy-1"
+
+
 def test_withheld_sql_counts_a_repeat():
     sql = PostgresPool.build_failure_episode_withheld_sql(["body_sha256", "stage", "reason"])
     assert 'ON CONFLICT ("body_sha256", "stage", "reason")' in sql
@@ -589,6 +715,24 @@ async def test_real_pg_1001_distinct_twice(pool):
         for n in range(1001):
             await handle("k", rec(n), pool)
     assert await _count(pool) == 1001
+
+
+async def test_real_pg_label_columns_with_and_without_a_policy(pool):
+    await handle("k", rec(1), pool)
+    async with pool._pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT "label_key", "label" FROM "failure_episodes"')
+    assert row["label_key"] is None and row["label"] is None
+    async with pool._pool.acquire() as conn:
+        await conn.execute('CREATE TABLE "label_policy" ("policy_id" text NOT NULL)')
+        await conn.execute("INSERT INTO \"label_policy\" VALUES ('example:policy-1')")
+    assert await pool.fetch_label_policy_id() == "example:policy-1"
+    pool._label_policy_loaded = False
+    await handle("k", rec(2), pool)
+    async with pool._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT "label_key", "label" FROM "failure_episodes" WHERE "episode_id" = $1',
+            "ep-t-00002")
+    assert row["label_key"].startswith("lk1:") and json.loads(row["label"])["v"] == 1
 
 
 async def test_real_pg_withheld_replay_counts_and_kept_on_refusal(pool):
