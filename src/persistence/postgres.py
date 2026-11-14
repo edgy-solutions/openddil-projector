@@ -439,6 +439,17 @@ class PostgresPool:
                                   and v is not None) else v
                 for c, v in row.items()]
 
+    async def upsert_failure_episode_withheld(self, row: dict[str, Any]) -> None:
+        """Keep a refused record with its reason. A repeat of the same
+        (body_sha256, stage, reason) bumps times_seen and last_seen_at."""
+        sql = self.build_failure_episode_withheld_sql(list(row.keys()))
+        values = [json.dumps(v) if c == "body" else v for c, v in row.items()]
+
+        async def op(conn: Any) -> None:
+            await conn.execute(sql, *values)
+
+        await self._retrying("upsert_failure_episode_withheld", op)
+
     async def insert_failure_episode(self, row: dict[str, Any]) -> str:
         """First write wins. Returns "inserted", "duplicate" (a row with this
         key and the same body_sha256 exists) or "conflict" (same key, other

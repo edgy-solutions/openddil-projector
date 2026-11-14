@@ -151,6 +151,17 @@ mappings:
     decode_as: json
     mode: custom
 
+  # failure-episodes-withheld: failure-episode records cm-service refused at
+  # emit or backfill, kept with their reason (ADR-0055: withheld, not dropped).
+  # Never pruned (config.NEVER_PRUNED_TABLES), operator-only, not published to
+  # Electric.
+  - topic: failure-episodes-withheld
+    handler: failure_episodes_withheld
+    table: failure_episodes_withheld
+    consumer_group: projector-failure-episodes-withheld
+    decode_as: json
+    mode: custom
+
   - topic: asset-declarations
     handler: asset_correlation
     table: asset_correlation

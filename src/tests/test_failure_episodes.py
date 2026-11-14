@@ -25,11 +25,15 @@ from config import NEVER_PRUNED_TABLES, Mapping, load_config
 from handlers import get_handler
 from handlers.base import refused_rows
 from handlers.failure_episodes import body_sha256, handle
+from handlers.failure_episodes_withheld import handle as handle_withheld
 from main import build_prune_targets
 from metrics import FAILURE_EPISODE_WRITES
 from persistence.postgres import PostgresPool, PostgresWriteError
 
 GOLDEN = Path(__file__).parent / "golden" / "failure_episode_record.json"
+# CONTRACT COPY of cm-service src/tests/golden/failure_episode_withheld.json.
+GOLDEN_WITHHELD = Path(__file__).parent / "golden" / "failure_episode_withheld.json"
+GOLDEN_WITHHELD_SHA256 = "68bee17ae03e4bdd02a935c1f6d86ca2a2dae91bc1c90f24c63293c309e9f214"
 GOLDEN_SHA256 = "cc42f7199b7ca7a4f1f3f2a034075a935ec9e406063afeeedacc6e516a6dbfbb"
 # body_sha256 of the golden record: canonical JSON, sorted keys, no spaces.
 GOLDEN_BODY_SHA256 = "592552ae855a014217e36bd84adfe2f3e5762cbffa51c03dea8661b8f8681f87"
@@ -58,6 +62,23 @@ CREATE TABLE "public"."failure_episodes" (
   PRIMARY KEY ("episode_id", "detected_at")
 );
 """
+WITHHELD_SQL = """
+CREATE TABLE "public"."failure_episodes_withheld" (
+  "body_sha256" text NOT NULL,
+  "stage" text NOT NULL,
+  "reason" text NOT NULL,
+  "asset_id" text NOT NULL DEFAULT '',
+  "episode_id" text NOT NULL DEFAULT '',
+  "detected_at" timestamptz NULL,
+  "body" jsonb NOT NULL,
+  "edge_id" text NOT NULL DEFAULT '',
+  "region_id" text NULL,
+  "first_seen_at" timestamptz NOT NULL DEFAULT now(),
+  "last_seen_at" timestamptz NOT NULL DEFAULT now(),
+  "times_seen" bigint NOT NULL DEFAULT 1,
+  PRIMARY KEY ("body_sha256", "stage", "reason")
+);
+"""
 MIGRATION_COLUMNS = re.findall(r'^\s+"(\w+)" ', MIGRATION_SQL, re.M)
 KEY = ("episode_id", "detected_at")
 
@@ -80,9 +101,20 @@ class FakePool:
     def __init__(self):
         self.rows: dict[tuple, dict] = {}
         self.inserts = 0
+        self.withheld: dict[tuple, dict] = {}
+        self.raise_on_insert: Exception | None = None
+
+    async def upsert_failure_episode_withheld(self, row: dict) -> None:
+        k = (row["body_sha256"], row["stage"], row["reason"])
+        if k in self.withheld:
+            self.withheld[k]["times_seen"] += 1
+        else:
+            self.withheld[k] = {**row, "times_seen": 1}
 
     async def insert_failure_episode(self, row: dict) -> str:
         self.inserts += 1
+        if self.raise_on_insert is not None:
+            raise self.raise_on_insert
         k = tuple(row[c] for c in KEY)
         if k not in self.rows:
             self.rows[k] = dict(row)
@@ -327,9 +359,145 @@ async def test_refusals_counted(mutate, reason):
     r = golden()
     mutate(r)
     p = FakePool()
+    w0 = outcome_count("withheld")
     await handle("k", r, p)
     assert p.inserts == 0 and not p.rows
     assert refused_rows().get(name, 0) == before + 1
+    # kept, not dropped: one withheld row, stage projector, with the reason
+    assert len(p.withheld) == 1
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("projector", reason)
+    assert w["body"] == r and w["body_sha256"] == body_sha256(r)
+    assert outcome_count("withheld") == w0 + 1
+
+
+async def test_refusal_fills_what_parses_and_defaults_the_rest():
+    r = golden()
+    r["originator_nation"] = ""
+    p = FakePool()
+    await handle("k", r, p)
+    w = next(iter(p.withheld.values()))
+    assert (w["asset_id"], w["episode_id"]) == ("asset-t-0001", "ep-t-0001")
+    assert w["detected_at"] == datetime(2023, 11, 14, 22, 15, 0, tzinfo=timezone.utc)
+    assert (w["edge_id"], w["region_id"]) == ("edge-a", "region-a")
+    p2 = FakePool()
+    await handle("k", {"x": 1}, p2)
+    w = next(iter(p2.withheld.values()))
+    assert (w["asset_id"], w["episode_id"], w["detected_at"], w["edge_id"],
+            w["region_id"]) == ("", "", None, "", None)
+
+
+async def test_write_error_keeps_a_withheld_row():
+    p = FakePool()
+    p.raise_on_insert = PostgresWriteError("check violation")
+    w0 = outcome_count("withheld")
+    await handle("k", golden(), p)
+    assert not p.rows and len(p.withheld) == 1
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("projector", "write_error")
+    assert w["episode_id"] == "ep-t-0001" and w["body"] == golden()
+    assert outcome_count("withheld") == w0 + 1
+
+
+async def test_other_exceptions_are_not_swallowed():
+    p = FakePool()
+    p.raise_on_insert = RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        await handle("k", golden(), p)
+    assert not p.withheld
+
+
+async def test_withheld_write_failure_raises():
+    class P(FakePool):
+        async def upsert_failure_episode_withheld(self, row):
+            raise PostgresWriteError("nope")
+
+    r = golden()
+    r["originator_nation"] = ""
+    with pytest.raises(PostgresWriteError):
+        await handle("k", r, P())
+
+
+def test_withheld_sql_counts_a_repeat():
+    sql = PostgresPool.build_failure_episode_withheld_sql(["body_sha256", "stage", "reason"])
+    assert 'ON CONFLICT ("body_sha256", "stage", "reason")' in sql
+    assert 'DO UPDATE SET "times_seen" = t."times_seen" + 1' in sql
+    assert '"last_seen_at" = now()' in sql
+
+
+async def test_real_pool_withheld_upsert_retries_and_binds_body_as_json():
+    seen = []
+
+    class C(_Conn):
+        async def execute(self, sql, *args):
+            self.calls += 1
+            if self.fail:
+                self.fail -= 1
+                raise OSError("reset")
+            seen.append(args)
+
+    conn = C(1, "")
+    row = {"body_sha256": "h", "stage": "projector", "reason": "r",
+           "body": {"a": 1}}
+    await _pool_over(conn).upsert_failure_episode_withheld(row)
+    assert conn.calls == 2 and seen[0][3] == '{"a": 1}'
+
+
+# -- the withheld topic ----------------------------------------------------
+
+def withheld_golden() -> dict:
+    return json.loads(GOLDEN_WITHHELD.read_bytes())
+
+
+def test_withheld_golden_is_the_contract_copy():
+    assert hashlib.sha256(GOLDEN_WITHHELD.read_bytes()).hexdigest() == GOLDEN_WITHHELD_SHA256
+
+
+def test_withheld_handler_registered_and_mapped():
+    assert get_handler("failure_episodes_withheld") is handle_withheld
+    cfg = load_config(CONFIG_YAML)
+    m = next(m for m in cfg.mappings if m.table == "failure_episodes_withheld")
+    assert (m.topic, m.handler, m.consumer_group, m.decode_as, m.mode) == (
+        "failure-episodes-withheld", "failure_episodes_withheld",
+        "projector-failure-episodes-withheld", "json", "custom")
+    assert m.asset_ttl_hours is None
+
+
+async def test_withheld_golden_writes_one_row_replay_counts():
+    p = FakePool()
+    g = withheld_golden()
+    w0 = outcome_count("withheld")
+    await handle_withheld("asset-t-0001", g, p)
+    assert len(p.withheld) == 1
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("emit", "unlabelled")
+    assert w["episode_id"] == "ep-t-0001" and w["asset_id"] == "asset-t-0001"
+    assert w["detected_at"] == datetime(2023, 11, 14, 22, 15, 0, tzinfo=timezone.utc)
+    assert (w["edge_id"], w["region_id"]) == ("edge-a", "region-a")
+    assert w["body"] == g and w["body_sha256"] == body_sha256(g)
+    assert w["times_seen"] == 1
+    await handle_withheld("asset-t-0001", withheld_golden(), p)
+    assert len(p.withheld) == 1 and next(iter(p.withheld.values()))["times_seen"] == 2
+    assert outcome_count("withheld") == w0 + 2
+
+
+@pytest.mark.parametrize("drop", ["reason", "stage"])
+async def test_withheld_without_stage_or_reason_is_malformed(drop):
+    g = withheld_golden()
+    del g[drop]
+    p = FakePool()
+    await handle_withheld("k", g, p)
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("projector", "malformed_withheld")
+    assert w["body"] == g
+
+
+async def test_withheld_null_detected_at_when_zero():
+    g = withheld_golden()
+    g["detected_at_ns"] = 0
+    p = FakePool()
+    await handle_withheld("k", g, p)
+    assert next(iter(p.withheld.values()))["detected_at"] is None
 
 
 # -- never pruned ------------------------------------------------------------
@@ -392,7 +560,7 @@ async def pool():
     p = PostgresPool(f"{dsn}{sep}search_path={schema}")
     await p.connect()
     async with p._pool.acquire() as conn:
-        await conn.execute(MIGRATION_SQL.replace('"public".', ""))
+        await conn.execute((MIGRATION_SQL + WITHHELD_SQL).replace('"public".', ""))
     try:
         yield p
     finally:
@@ -421,6 +589,27 @@ async def test_real_pg_1001_distinct_twice(pool):
         for n in range(1001):
             await handle("k", rec(n), pool)
     assert await _count(pool) == 1001
+
+
+async def test_real_pg_withheld_replay_counts_and_kept_on_refusal(pool):
+    r = golden()
+    r["originator_nation"] = ""
+    for _ in range(3):
+        await handle("k", r, pool)
+    assert await _count(pool) == 0
+    async with pool._pool.acquire() as conn:
+        rows = await conn.fetch('SELECT * FROM "failure_episodes_withheld"')
+    assert len(rows) == 1
+    assert (rows[0]["stage"], rows[0]["reason"], rows[0]["times_seen"]) == (
+        "projector", "unlabelled", 3)
+    assert json.loads(rows[0]["body"]) == r
+
+
+async def test_real_pg_withheld_topic_record(pool):
+    await handle_withheld("k", withheld_golden(), pool)
+    async with pool._pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM "failure_episodes_withheld"')
+    assert (row["stage"], row["reason"], row["episode_id"]) == ("emit", "unlabelled", "ep-t-0001")
 
 
 async def test_real_pg_conflict_keeps_the_first_row(pool):
