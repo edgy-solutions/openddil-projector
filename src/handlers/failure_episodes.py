@@ -139,8 +139,21 @@ async def handle(key: str, decoded: dict[str, Any], pool: PostgresPool) -> None:
     # lk1 key and body, compiled at write from the pinned openddil_labels.
     # None, None when there is no label_policy row. An unlabelled close was
     # refused above, so the originator is non-empty here.
-    compiled = compile_lk1(await _label_policy_id(pool),
-                           decoded["originator_nation"], releasable)
+    # A policy that will not compile, or a label that will not compile under
+    # one, is withheld with its reason: never dropped, and never written with
+    # NULL label columns (NULL means "no label_policy row").
+    policy_id = await _label_policy_id(pool)
+    try:
+        compiled = compile_lk1(policy_id, decoded["originator_nation"],
+                               releasable)
+    except ValueError:
+        await _refuse(pool, decoded, "label_policy_invalid",
+                      f"{ep} policy_id={str(policy_id)[:64]!r}")
+        return
+    if compiled is None and isinstance(policy_id, str) and policy_id:
+        await _refuse(pool, decoded, "label_invalid",
+                      f"{ep} policy_id={policy_id[:64]!r}")
+        return
     label_key, label = compiled if compiled is not None else (None, None)
     row: dict[str, Any] = {
         "episode_id": episode_id,

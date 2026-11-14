@@ -766,3 +766,37 @@ async def test_real_pg_conflict_keeps_the_first_row(pool):
         row = await conn.fetchrow('SELECT "resolution", "body_sha256" FROM "failure_episodes"')
     assert row["resolution"] == "swapped module"
     assert row["body_sha256"] == GOLDEN_BODY_SHA256
+
+
+@pytest.mark.parametrize("policy,nation,release,reason", [
+    ("bad policy!", "ATL", ["BDR"], "label_policy_invalid"),
+    ("example:policy-1", "atl", ["BDR"], "label_invalid"),
+    ("example:policy-1", "ATL", ["BDR", "x"], "label_invalid"),
+])
+async def test_label_that_does_not_compile_is_withheld_never_written(
+        policy, nation, release, reason):
+    r = golden()
+    r["originator_nation"] = nation
+    r["releasable_to"] = release
+    p = FakePool()
+    p.policy = policy
+    w0 = outcome_count("withheld")
+    await handle("k", r, p)
+    assert p.inserts == 0 and not p.rows
+    assert len(p.withheld) == 1
+    w = next(iter(p.withheld.values()))
+    assert (w["stage"], w["reason"]) == ("projector", reason)
+    assert w["body"] == r and w["body_sha256"] == body_sha256(r)
+    assert outcome_count("withheld") == w0 + 1
+
+
+async def test_no_policy_with_lowercase_nation_still_inserts_unkeyed():
+    r = golden()
+    r["originator_nation"] = "atl"
+    p = FakePool()
+    w0 = outcome_count("withheld")
+    await handle("k", r, p)
+    assert len(p.rows) == 1 and not p.withheld
+    row = next(iter(p.rows.values()))
+    assert row["label_key"] is None and row["label"] is None
+    assert outcome_count("withheld") == w0
