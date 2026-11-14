@@ -59,7 +59,8 @@ _REGISTRY: dict[str, Handler] = {
     "munition_track": munition_track.handle,
     # ADR-0050 declare-and-expect; pure upserts, never pruned.
     "asset_declaration": asset_declaration.handle,
-    # ADR-0051 closed failure episodes; durable, upsert on (episode_id, detected_at).
+    # ADR-0051 closed failure episodes; mode "custom", first write wins on
+    # (episode_id, detected_at), a different body is a counted conflict.
     "failure_episodes": failure_episodes.handle,
     "asset_correlation": asset_correlation.handle,
     "asset_fielding": asset_fielding.handle,

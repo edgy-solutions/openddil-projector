@@ -380,6 +380,85 @@ class PostgresPool:
                     f"non-retryable write to {write.table}: {exc}"
                 ) from exc
 
+    # -- failure_episodes: first write wins (ADR-0051) -----------------------
+
+    _FAILURE_EPISODE_JSONB = frozenset({"sources", "mod_compliance", "label"})
+
+    @staticmethod
+    def build_failure_episode_insert_sql(columns: list[str]) -> str:
+        """INSERT .. ON CONFLICT DO NOTHING for failure_episodes. Pure.
+
+        A closed episode is history: the first write wins and a replay never
+        overwrites. There is deliberately no DO UPDATE here."""
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        val_list = ", ".join(f"${i + 1}" for i in range(len(columns)))
+        return (f'INSERT INTO "failure_episodes" ({col_list}) '
+                f'VALUES ({val_list}) '
+                f'ON CONFLICT ("episode_id", "detected_at") DO NOTHING')
+
+    @staticmethod
+    def build_failure_episode_hash_sql() -> str:
+        return ('SELECT "body_sha256" FROM "failure_episodes" '
+                'WHERE "episode_id" = $1 AND "detected_at" = $2')
+
+    @staticmethod
+    def build_failure_episode_withheld_sql(columns: list[str]) -> str:
+        """INSERT .. ON CONFLICT DO UPDATE times_seen for the withheld table."""
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        val_list = ", ".join(f"${i + 1}" for i in range(len(columns)))
+        return (f'INSERT INTO "failure_episodes_withheld" AS t ({col_list}) '
+                f'VALUES ({val_list}) '
+                f'ON CONFLICT ("body_sha256", "stage", "reason") '
+                f'DO UPDATE SET "times_seen" = t."times_seen" + 1, '
+                f'"last_seen_at" = now()')
+
+    async def _retrying(self, what: str, op: Any) -> Any:
+        """Run `op(conn)` on one connection with execute()'s retry loop:
+        transient errors back off and retry until success; any other
+        asyncpg.PostgresError raises PostgresWriteError."""
+        if self._pool is None:
+            raise RuntimeError(f"PostgresPool.{what} called before connect()")
+        attempt = 0
+        while True:
+            try:
+                async with self._pool.acquire() as conn:
+                    return await op(conn)
+            except (OSError, asyncpg.PostgresConnectionError) as exc:
+                delay = self._backoff(attempt)
+                log.warning(
+                    "postgres %s failed (attempt %d): %s — retry in %.1fs",
+                    what, attempt + 1, exc, delay)
+                await asyncio.sleep(delay)
+                attempt += 1
+            except asyncpg.PostgresError as exc:
+                raise PostgresWriteError(
+                    f"non-retryable {what}: {exc}") from exc
+
+    def _bind_row(self, row: dict[str, Any]) -> list[Any]:
+        return [json.dumps(v) if (c in self._FAILURE_EPISODE_JSONB
+                                  and v is not None) else v
+                for c, v in row.items()]
+
+    async def insert_failure_episode(self, row: dict[str, Any]) -> str:
+        """First write wins. Returns "inserted", "duplicate" (a row with this
+        key and the same body_sha256 exists) or "conflict" (same key, other
+        body; the stored row is untouched)."""
+        sql = self.build_failure_episode_insert_sql(list(row.keys()))
+        values = self._bind_row(row)
+
+        async def op(conn: Any) -> str:
+            status = await conn.execute(sql, *values)
+            if str(status).split()[-1] != "0":
+                return "inserted"
+            stored = await conn.fetchval(
+                self.build_failure_episode_hash_sql(),
+                row["episode_id"], row["detected_at"])
+            if stored == row["body_sha256"]:
+                return "duplicate"
+            return StoredHashOutcome("conflict", stored or "")
+
+        return await self._retrying("insert_failure_episode", op)
+
     @staticmethod
     def build_staleness_sweep_sql(
         table: str,
@@ -1077,6 +1156,16 @@ class PostgresPool:
             return int(result.split()[-1])
         except (ValueError, IndexError):  # pragma: no cover
             return 0
+
+
+class StoredHashOutcome(str):
+    """A "conflict" outcome that also carries the stored row's body hash, for
+    the handler's log line. Compares equal to the plain string."""
+
+    def __new__(cls, value: str, stored_sha256: str):
+        obj = super().__new__(cls, value)
+        obj.stored_sha256 = stored_sha256
+        return obj
 
 
 class PostgresWriteError(Exception):
