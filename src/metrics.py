@@ -25,6 +25,16 @@ POSTGRES_ERRORS = Counter(
     "Non-retryable Postgres write errors (message logged-and-skipped)",
     ["operation"],
 )
+# failure_episodes writes (ADR-0051): one increment per record. First write
+# wins; `conflict` = same key, different body (the stored row is untouched);
+# `withheld` = refused or unwritable, kept in failure_episodes_withheld.
+FAILURE_EPISODE_WRITES = Counter(
+    "projector_failure_episode_writes_total",
+    "failure-episodes records, by outcome",
+    ["outcome"],
+)
+for _outcome in ("inserted", "duplicate", "conflict", "withheld"):
+    FAILURE_EPISODE_WRITES.labels(outcome=_outcome)
 TOPIC_LAG = Gauge(
     "projector_topic_lag",
     "Consumer-group lag (high watermark - committed position), summed over partitions",

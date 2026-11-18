@@ -14,6 +14,31 @@ from edge_assignment import load_yaml_no_duplicate_keys
 
 DEFAULT_CONFIG_PATH = "/app/src/config/projector_config.yaml"
 
+# Durable records: never pruned, by code. A mapping on one of these tables
+# takes no TTL from the PROJECTOR_ASSET_TTL_HOURS override, a yaml
+# asset_ttl_hours on it is a load error, and build_prune_targets (main.py)
+# never returns it. Why each is here:
+#   failure_episodes          ADR-0051: closed episodes are history, first write wins
+#   failure_episodes_withheld ADR-0051: refused records kept with their reason
+#   effector_launch           running SUM must never decrease (the launch record)
+#   effector_resupply         running SUM must never decrease (the resupply ledger)
+#   munition_track            ADR-0049: munition track records
+#   asset_declaration         ADR-0050: declare-and-expect, declared assets
+#   asset_correlation         ADR-0050: declare-and-expect, correlations
+#   asset_fielding            ADR-0050: declare-and-expect, fielding
+# NOT here, on purpose: parts_availability and the region_* rollups are
+# refreshed tables (each write replaces the last), not records.
+NEVER_PRUNED_TABLES = frozenset({
+    "failure_episodes",
+    "failure_episodes_withheld",
+    "effector_launch",
+    "effector_resupply",
+    "munition_track",
+    "asset_declaration",
+    "asset_correlation",
+    "asset_fielding",
+})
+
 
 @dataclass(frozen=True)
 class Mapping:
@@ -110,10 +135,17 @@ def load_config(path: Path | None = None) -> Config:
                 f"positive asset_ttl_hours (got mode={mode!r}, "
                 f"asset_ttl_hours={asset_ttl!r})"
             )
+        if entry["table"] in NEVER_PRUNED_TABLES and asset_ttl is not None:
+            raise ValueError(
+                f"mapping for topic {entry['topic']!r}: table "
+                f"{entry['table']!r} is a durable record and is never "
+                f"pruned; asset_ttl_hours={asset_ttl!r} is not allowed"
+            )
         # A custom mapping that declares its own asset_ttl_hours is pruned
         # like an upsert one (asset_element_telemetry); other custom
         # mappings never take a TTL from the env.
         if ((mode == "upsert" or (mode == "custom" and asset_ttl))
+                and entry["table"] not in NEVER_PRUNED_TABLES
                 and env_ttl_override is not None):
             # 0 disables; positive value overrides whatever yaml said.
             asset_ttl = env_ttl_override if env_ttl_override > 0 else None
