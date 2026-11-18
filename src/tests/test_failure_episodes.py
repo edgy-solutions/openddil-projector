@@ -544,6 +544,18 @@ async def test_fetch_label_policy_id_table_missing_row_missing_and_present():
     assert await _pool_over(C("label_policy", "example:policy-1")).fetch_label_policy_id() == "example:policy-1"
 
 
+async def test_label_policy_existence_check_follows_the_search_path():
+    seen = []
+
+    class C:
+        async def fetchval(self, sql, *a):
+            seen.append(sql)
+            return "label_policy"
+
+    await _pool_over(C()).fetch_label_policy_id()
+    assert "to_regclass('label_policy')" in seen[0]
+    assert "public." not in seen[0]
+
 def test_withheld_sql_counts_a_repeat():
     sql = PostgresPool.build_failure_episode_withheld_sql(["body_sha256", "stage", "reason"])
     assert 'ON CONFLICT ("body_sha256", "stage", "reason")' in sql

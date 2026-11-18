@@ -454,7 +454,7 @@ class PostgresPool:
         """The active label policy id (DESIGN-2026-11-06 section 1.1), or None
         when the label_policy table does not exist yet or has no row."""
         async def op(conn: Any) -> str | None:
-            if await conn.fetchval("SELECT to_regclass('public.label_policy')") is None:
+            if await conn.fetchval("SELECT to_regclass('label_policy')") is None:
                 return None
             return await conn.fetchval("SELECT policy_id FROM label_policy")
 
