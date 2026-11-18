@@ -165,6 +165,14 @@ ELEMENT_WRITES_REFUSED = Counter(
 )
 for _reason in ("no_label_record", "label_record_unlabelled"):
     ELEMENT_WRITES_REFUSED.labels(reason=_reason)
+BAND_ROWS_REFUSED = Counter(
+    "openddil_band_rows_refused_total",
+    "Element band tactical_events rows refused because the asset has no labels in this tier's label record",
+    ["type", "reason"],
+)
+for _type in ("openddil.element.band", "openddil.element.bandcount"):
+    for _reason in ("no_label_record", "label_record_unlabelled"):
+        BAND_ROWS_REFUSED.labels(type=_type, reason=_reason)
 ELEMENT_LABEL_RESTAMPS = Counter(
     "openddil_element_label_restamps_total",
     "Assets whose element rows were restamped because their label record changed",

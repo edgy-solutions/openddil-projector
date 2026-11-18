@@ -337,3 +337,101 @@ def test_connect_survives_past_attempt_1024(monkeypatch, caplog):
     asyncio.run(pool.connect())
     assert pool._pool is sentinel
     assert len(delays) == _OUTAGE_ATTEMPTS
+
+
+# --- labelled append (band rows take the tier record's labels) -------------
+
+def _band_write(**over):
+    kw = dict(
+        table="tactical_events", mode="append", key_columns=["id"],
+        row={"id": "ce-b1", "type": "openddil.element.band",
+             "subject": "asset-a", "data": {"band": "amber"}},
+        jsonb_columns={"data"}, labels_from_record="asset-a",
+    )
+    kw.update(over)
+    return Write(**kw)
+
+
+def test_labelled_append_sql_reads_the_record_and_inserts_only_when_labelled():
+    sql = PostgresPool.build_sql(_band_write())
+    assert sql == (
+        "WITH lab AS (SELECT originator_nation, releasable_to "
+        'FROM "telemetry_latest_state" WHERE "asset_id" = $5), '
+        'ins AS (INSERT INTO "tactical_events" ("id", "type", "subject", "data", '
+        '"originator_nation", "releasable_to") '
+        "SELECT $1, $2, $3, $4, lab.originator_nation, "
+        "COALESCE(lab.releasable_to, '{}'::text[]) FROM lab "
+        "WHERE COALESCE(lab.originator_nation, '') <> '' "
+        'ON CONFLICT ("id") DO NOTHING RETURNING 1) '
+        "SELECT (SELECT count(*) FROM lab) AS lab_rows, "
+        "(SELECT count(*) FROM lab "
+        "WHERE COALESCE(originator_nation, '') <> '') AS labelled_rows, "
+        "(SELECT count(*) FROM ins) AS inserted_rows"
+    )
+
+
+def test_labelled_append_binds_the_row_then_the_asset_id():
+    assert PostgresPool._bind_values(_band_write()) == [
+        "ce-b1", "openddil.element.band", "asset-a",
+        json.dumps({"band": "amber"}), "asset-a"]
+
+
+def test_plain_append_is_unchanged_without_labels_from_record():
+    write = _band_write(labels_from_record=None)
+    assert "telemetry_latest_state" not in PostgresPool.build_sql(write)
+    assert len(PostgresPool._bind_values(write)) == 4
+
+
+def test_labels_from_record_outside_append_is_refused():
+    for mode in ("upsert", "update"):
+        with pytest.raises(ValueError):
+            PostgresPool.build_sql(_band_write(mode=mode))
+
+
+def test_labels_from_record_row_carrying_labels_is_refused():
+    for extra in ({"originator_nation": "ATL"}, {"releasable_to": []}):
+        row = {"id": "ce-b1", "subject": "asset-a", **extra}
+        with pytest.raises(ValueError):
+            PostgresPool.build_sql(_band_write(row=row))
+
+
+def test_labelled_append_outcome_from_the_three_counts():
+    f = PostgresPool.labelled_append_outcome
+    assert f(0, 0, 0) == "no_label_record"
+    assert f(1, 0, 0) == "label_record_unlabelled"
+    assert f(1, 1, 1) == "inserted"
+    assert f(1, 1, 0) == "duplicate"
+
+
+def test_labelled_append_retries_an_outage_and_never_returns_a_refusal(
+        monkeypatch, caplog):
+    caplog.set_level(logging.CRITICAL)
+    delays = _count_sleeps(monkeypatch)
+
+    class _Conn:
+        async def fetchrow(self, sql, *values):
+            return (1, 1, 1)
+
+    class _Acquire:
+        def __init__(self, owner):
+            self._owner = owner
+
+        async def __aenter__(self):
+            self._owner.entries += 1
+            if self._owner.entries <= 3:
+                raise OSError("postgres down")
+            return _Conn()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakePool:
+        entries = 0
+
+        def acquire(self):
+            return _Acquire(self)
+
+    pool = PostgresPool("postgres://unused")
+    pool._pool = _FakePool()
+    assert asyncio.run(pool.execute(_band_write())) == "inserted"
+    assert len(delays) == 3
